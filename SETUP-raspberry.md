@@ -36,9 +36,9 @@ esse caminho no `config.js` (campo `chromiumPath`).
 ## 2. Baixar e configurar o robô
 
 ```bash
-# Vai para a home e clona (ou copie a pasta do projeto pra cá)
+# Vai para a home e clona o repositório
 cd ~
-git clone <url-do-repositorio> malharias-robo-whatsapp
+git clone https://github.com/KauanPickler/malharias-robo-whatsapp.git
 cd malharias-robo-whatsapp
 
 # Instala dependências SEM baixar o Chromium do puppeteer (usamos o do sistema)
