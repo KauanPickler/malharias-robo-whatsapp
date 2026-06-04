@@ -34,6 +34,29 @@ if (!config.ingestToken || config.ingestToken.includes('COLE_AQUI')) {
 // flags de transcrição etc. são gerenciados no painel e buscados aqui.
 let remote = {}
 
+// Estado do robô (para o heartbeat / painel).
+const bootTime = new Date().toISOString()
+const VERSION = '1.0.0'
+let whatsappReady = false
+
+/** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
+async function heartbeatLoop() {
+  try {
+    await fetch(`${config.hubUrl}/api/robo/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: config.ingestToken,
+        uptime: Math.round(process.uptime()),
+        started_at: bootTime,
+        whatsapp: whatsappReady,
+        version: VERSION,
+      }),
+    })
+  } catch {}
+  setTimeout(heartbeatLoop, 60000) // a cada 60s
+}
+
 async function carregarConfigRemota() {
   try {
     const res = await fetch(`${config.hubUrl}/api/robo/config?token=${encodeURIComponent(config.ingestToken)}`)
@@ -271,10 +294,14 @@ client.on('qr', (qr) => {
 client.on('authenticated', () => console.log('✅ Autenticado.'))
 client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m))
 client.on('ready', () => {
+  whatsappReady = true
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
 })
-client.on('disconnected', (r) => console.warn('⚠️ Desconectado:', r))
+client.on('disconnected', (r) => {
+  whatsappReady = false
+  console.warn('⚠️ Desconectado:', r)
+})
 
 // Evita reenviar a mesma mensagem (dedupe simples em memória).
 const enviadas = new Set()
@@ -396,5 +423,8 @@ async function enviarAoHub(payload) {
 // Busca a config do hub antes de iniciar e renova a cada 1 min.
 await carregarConfigRemota()
 setInterval(carregarConfigRemota, 60_000)
+
+// Começa a reportar o estado ao hub (mesmo antes do WhatsApp conectar).
+heartbeatLoop()
 
 client.initialize()
