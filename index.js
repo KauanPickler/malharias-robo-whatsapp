@@ -84,6 +84,23 @@ function cfg() {
     grupoParaSistema: remote.grupo_para_sistema ?? config.grupoParaSistema ?? {},
     controleNumeros: remote.controle_numeros ?? config.controleNumeros ?? [],
     notificarDemandas: remote.notificar_demandas ?? config.notificarDemandas ?? true,
+    somenteMapeados: remote.somente_mapeados ?? config.somenteMapeados ?? false,
+  }
+}
+
+/** Reporta ao hub a lista de grupos que o bot enxerga (para selecionar no painel). */
+async function reportarGrupos() {
+  try {
+    if (!whatsappReady) return
+    const chats = await client.getChats()
+    const grupos = chats.filter((c) => c.isGroup).map((c) => c.name).filter(Boolean)
+    await fetch(`${config.hubUrl}/api/robo/grupos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, grupos }),
+    })
+  } catch (e) {
+    console.warn('⚠️ Falha ao reportar grupos:', e.message)
   }
 }
 
@@ -297,6 +314,8 @@ client.on('ready', () => {
   whatsappReady = true
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
+  reportarGrupos() // manda a lista de grupos pro painel
+  setInterval(reportarGrupos, 5 * 60 * 1000) // atualiza a cada 5 min
 })
 client.on('disconnected', (r) => {
   whatsappReady = false
@@ -337,6 +356,13 @@ client.on('message', async (msg) => {
     if (c.apenasGrupos && !chat.isGroup) return
 
     const grupo = chat.name || ''
+
+    // Modo whitelist: só processa grupos que estão mapeados no painel.
+    if (c.somenteMapeados && chat.isGroup) {
+      const mapeados = Object.keys(c.grupoParaSistema || {}).map((g) => g.toLowerCase())
+      if (!mapeados.includes(grupo.toLowerCase())) return
+    }
+
     const texto = (msg.body || '').trim()
 
     // Tipos de mídia que sabemos transcrever no hub (áudio por padrão).
