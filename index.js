@@ -60,6 +60,7 @@ function cfg() {
     ignorarGrupos: remote.ignorar_grupos ?? config.ignorarGrupos ?? [],
     grupoParaSistema: remote.grupo_para_sistema ?? config.grupoParaSistema ?? {},
     controleNumeros: remote.controle_numeros ?? config.controleNumeros ?? [],
+    notificarDemandas: remote.notificar_demandas ?? config.notificarDemandas ?? true,
   }
 }
 
@@ -163,6 +164,51 @@ async function tratarComando(msg) {
   return askAssistente(msg)
 }
 
+/**
+ * Avisa o(s) admin(s) no WhatsApp quando uma nova demanda é registrada.
+ * Consulta o hub a cada 60s e envia o resumo (classificado pela IA).
+ */
+async function notificarDemandasLoop() {
+  try {
+    const c = cfg()
+    const admins = (c.controleNumeros || []).map(soDigitos).filter(Boolean)
+
+    if (c.notificarDemandas !== false && admins.length) {
+      const res = await fetch(
+        `${config.hubUrl}/api/robo/demandas-novas?token=${encodeURIComponent(config.ingestToken)}`,
+      )
+      if (res.ok) {
+        const data = await res.json()
+        for (const d of data.demandas || []) {
+          const urg = d.urgencia === 'alta' ? '🔴' : d.urgencia === 'media' ? '🟡' : '🟢'
+          const linhas = [
+            `🆕 *Nova demanda* ${urg} ${d.tipo}`,
+            `*Sistema:* ${d.sistema}`,
+          ]
+          if (d.maquina) linhas.push(`*Máquina:* ${d.maquina}`)
+          linhas.push('', d.resumo)
+          if (d.autor || d.grupo) linhas.push('', `_${[d.autor, d.grupo].filter(Boolean).join(' · ')}_`)
+          if (d.tem_imagem) linhas.push('📎 (tem imagem no painel)')
+          linhas.push('', `Responda aqui pra agir (ex: "marca a demanda ${d.id} como resolvida").`)
+          const texto = linhas.join('\n')
+
+          for (const num of admins) {
+            try {
+              await client.sendMessage(`${num}@c.us`, texto)
+            } catch (e) {
+              console.warn('⚠️ Falha ao avisar admin:', e.message)
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ Erro no aviso de demandas:', e.message)
+  }
+
+  setTimeout(notificarDemandasLoop, 60000) // a cada 60s
+}
+
 // Histórico de conversa por número (em memória), p/ a IA lembrar do contexto
 // (ex: pedir confirmação e você responder "confirmo").
 const historicos = new Map()
@@ -224,7 +270,10 @@ client.on('qr', (qr) => {
 
 client.on('authenticated', () => console.log('✅ Autenticado.'))
 client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m))
-client.on('ready', () => console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n'))
+client.on('ready', () => {
+  console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
+  notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
+})
 client.on('disconnected', (r) => console.warn('⚠️ Desconectado:', r))
 
 // Evita reenviar a mesma mensagem (dedupe simples em memória).
