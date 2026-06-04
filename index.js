@@ -129,10 +129,15 @@ async function tratarComando(msg) {
 
   if (lower === 'ajuda' || lower === '/ajuda' || lower === 'help' || lower === 'menu') {
     return msg.reply(
-      '🤖 *Comandos:*\n' +
-        '• *resumo do grupo NOME* — resumo das mensagens recentes\n' +
-        '• *grupos* — lista os grupos disponíveis\n' +
-        '• *ajuda* — esta mensagem',
+      '🤖 *Posso te ajudar com:*\n' +
+        '• *resumo do grupo NOME* — resumo das mensagens do grupo\n' +
+        '• *grupos* — lista os grupos disponíveis\n\n' +
+        'E qualquer coisa do sistema, é só pedir. Ex:\n' +
+        '• "status das máquinas da JM"\n' +
+        '• "quais demandas estão abertas?"\n' +
+        '• "abre uma demanda: trocar placa da máquina 5 na JM"\n' +
+        '• "como tá a fábrica?"\n' +
+        '• "faz o deploy da JM"',
     )
   }
 
@@ -153,7 +158,42 @@ async function tratarComando(msg) {
     return msg.reply(await resumirGrupo(nome))
   }
 
-  return msg.reply('Não entendi. Mande *ajuda* para ver os comandos.')
+  // Qualquer outra coisa vai para a IA do hub (mesma do chat do painel):
+  // ela pode ver máquinas, criar demanda, fazer deploy, etc.
+  return askAssistente(msg)
+}
+
+// Histórico de conversa por número (em memória), p/ a IA lembrar do contexto
+// (ex: pedir confirmação e você responder "confirmo").
+const historicos = new Map()
+
+async function askAssistente(msg) {
+  const chave = soDigitos(msg.from)
+  const hist = historicos.get(chave) || []
+
+  try {
+    const chat = await msg.getChat()
+    chat.sendStateTyping() // mostra "digitando..." enquanto a IA pensa
+  } catch {}
+
+  try {
+    const res = await fetch(`${config.hubUrl}/api/robo/assistente`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, mensagem: msg.body, historico: hist }),
+    })
+    const data = await res.json().catch(() => ({}))
+    const resposta = data.resposta || '⚠️ Não consegui responder agora.'
+
+    // Atualiza o histórico (mantém curto).
+    hist.push({ role: 'user', content: msg.body }, { role: 'assistant', content: resposta })
+    while (hist.length > 16) hist.shift()
+    historicos.set(chave, hist)
+
+    return msg.reply(resposta)
+  } catch (e) {
+    return msg.reply('⚠️ Erro ao falar com o hub: ' + e.message)
+  }
 }
 
 // Opções do Chrome headless. Em Raspberry/mini-PC é melhor usar o Chromium do
