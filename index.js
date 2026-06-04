@@ -273,7 +273,7 @@ async function askAssistente(msg) {
 
     // Atualiza o histórico (mantém curto).
     hist.push({ role: 'user', content: msg.body }, { role: 'assistant', content: resposta })
-    while (hist.length > 16) hist.shift()
+    while (hist.length > 10) hist.shift()
     historicos.set(chave, hist)
 
     return msg.reply(resposta)
