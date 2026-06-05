@@ -396,19 +396,28 @@ client.on('message', async (msg) => {
       return
     }
 
-    // GRUPO: se um número autorizado MARCAR o bot (@bot ou menção do número),
-    // ele responde no grupo com a IA. Senão, segue como demanda normal.
+    // GRUPO: se MARCAREM o bot (@menção do número ou "@bot"), ele responde no
+    // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
-      const mencionado =
-        (botId && (msg.mentionedIds || []).map(String).includes(botId)) ||
+      const botTail = soDigitos(String(client.info?.wid?._serialized || botId || '')).slice(-8)
+      const mencionou =
+        (botTail && (msg.mentionedIds || []).some((id) => soDigitos(String(id)).endsWith(botTail))) ||
+        (botTail && soDigitos(texto).includes(botTail)) ||
         /(^|\s)@?bot\b/i.test(texto)
-      if (mencionado && numeroAutorizado(fromNum)) {
-        lembrarAdmin(msg.from)
-        // tira o "@bot"/menções do texto antes de perguntar à IA
-        const pergunta = texto.replace(/@?bot\b/i, '').replace(/@\d+/g, '').trim()
-        await askAssistente(msg, pergunta || texto)
-        return
+
+      if (mencionou) {
+        const ok = numeroAutorizado(fromNum)
+        console.log(`   ↳ bot MARCADO no grupo | de=${fromNum} | autorizado=${ok} | mentions=${JSON.stringify(msg.mentionedIds || [])}`)
+        if (ok) {
+          lembrarAdmin(msg.from)
+          // tira menções (@número / @bot) do texto antes de perguntar à IA
+          const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
+          await askAssistente(msg, pergunta || texto)
+        } else {
+          await msg.reply('🔒 Só números autorizados podem me comandar. Peça pra adicionar seu número no painel (Robô & IA).')
+        }
+        return // marcado nunca vira demanda
       }
     }
 
