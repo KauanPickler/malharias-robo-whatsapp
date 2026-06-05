@@ -115,8 +115,10 @@ function ehComando(msg, chat) {
   const autorizados = (cfg().controleNumeros || []).map(soDigitos).filter(Boolean)
   if (!autorizados.length) return false
   const de = soDigitos(msg.from)
-  // aceita variações (com/sem 9, com/sem 55) por "termina com"
-  return autorizados.some((n) => de.endsWith(n) || n.endsWith(de))
+  // Compara pelos últimos 8 dígitos (ignora 55/DDD e o 9º dígito que o WhatsApp
+  // às vezes acrescenta/remove nos números do Brasil).
+  const tail = (s) => String(s).slice(-8)
+  return autorizados.some((n) => tail(n).length === 8 && tail(n) === tail(de))
 }
 
 /** Resume um grupo: busca as mensagens recentes e pede o resumo ao hub. */
