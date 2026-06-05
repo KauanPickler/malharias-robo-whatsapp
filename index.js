@@ -322,10 +322,42 @@ async function notificarDemandasLoop() {
 // Histórico de conversa por número (em memória), p/ a IA lembrar do contexto
 // (ex: pedir confirmação e você responder "confirmo").
 const historicos = new Map()
+const pendentes = new Map() // chave do chat -> ação pendente de confirmação
+
+/** Executa direto a ação pendente (já confirmada) — sem depender da IA lembrar. */
+async function executarPendente(msg, pend) {
+  try {
+    const chat = await msg.getChat()
+    chat.sendStateTyping()
+  } catch {}
+  try {
+    const res = await fetch(`${config.hubUrl}/api/robo/executar-pendente`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, pending: pend }),
+    })
+    const data = await res.json().catch(() => ({}))
+    return msg.reply(data.resposta || '⚠️ Não consegui executar.')
+  } catch (e) {
+    return msg.reply('⚠️ Erro ao executar: ' + e.message)
+  }
+}
 
 async function askAssistente(msg, textoOverride = null) {
   const pergunta = (textoOverride ?? msg.body ?? '').trim()
   const chave = soDigitos(msg.from)
+
+  // Há ação pendente? Confirmação -> executa direto; negação -> cancela.
+  const pend = pendentes.get(chave)
+  if (pend && /^(sim|confirmo|confirmar|pode|isso|ok|aplica|manda|👍|claro)\b/i.test(pergunta)) {
+    pendentes.delete(chave)
+    return executarPendente(msg, pend)
+  }
+  if (pend && /^(n[ãa]o|cancela|cancelar|deixa)\b/i.test(pergunta)) {
+    pendentes.delete(chave)
+    return msg.reply('Ok, cancelei. Nada foi alterado. 👍')
+  }
+
   const hist = historicos.get(chave) || []
 
   try {
@@ -341,6 +373,10 @@ async function askAssistente(msg, textoOverride = null) {
     })
     const data = await res.json().catch(() => ({}))
     const resposta = data.resposta || '⚠️ Não consegui responder agora.'
+
+    // Guarda (ou limpa) a ação pendente de confirmação.
+    if (data.pending_action) pendentes.set(chave, data.pending_action)
+    else pendentes.delete(chave)
 
     // Atualiza o histórico (mantém curto).
     hist.push({ role: 'user', content: pergunta }, { role: 'assistant', content: resposta })
