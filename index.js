@@ -161,7 +161,11 @@ function ehComando(fromNum, chat) {
 
 /** O bot foi marcado (@menção) nesta mensagem? Resolve o lid -> número do bot. */
 async function botFoiMencionado(msg, texto) {
-  if (/(^|\s)@?bot\b/i.test(texto || '')) return true
+  const t = (texto || '').trim()
+  // Mensagem que COMEÇA marcando alguém (@...) num grupo = comando pro bot.
+  // (a autorização é checada depois, então só quem pode comandar dispara)
+  if (/^@/.test(t)) return true
+  if (/(^|\s)@?bot\b/i.test(t)) return true
   const ids = msg.mentionedIds || []
   if (!ids.length) return false
   const botTails = [...botIds].map((b) => b.slice(-8))
