@@ -2,3 +2,4 @@ node_modules/
 sessao/
 config.js
 .DS_Store
+admin-chats.json

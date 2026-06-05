@@ -14,6 +14,23 @@
 import pkg from 'whatsapp-web.js'
 const { Client, LocalAuth } = pkg
 import qrcode from 'qrcode-terminal'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
+
+// Guarda os chats dos admins (quem comanda o bot) para enviar avisos.
+// Persiste em arquivo pra sobreviver a reinício.
+const ADMIN_FILE = './admin-chats.json'
+let adminChats = new Set()
+try {
+  if (existsSync(ADMIN_FILE)) adminChats = new Set(JSON.parse(readFileSync(ADMIN_FILE, 'utf8')))
+} catch {}
+function lembrarAdmin(id) {
+  if (id && !adminChats.has(id)) {
+    adminChats.add(id)
+    try {
+      writeFileSync(ADMIN_FILE, JSON.stringify([...adminChats]))
+    } catch {}
+  }
+}
 
 let config
 try {
@@ -38,6 +55,7 @@ let remote = {}
 const bootTime = new Date().toISOString()
 const VERSION = '1.0.0'
 let whatsappReady = false
+let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
 /** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
 async function heartbeatLoop() {
@@ -109,15 +127,19 @@ function soDigitos(s) {
   return String(s || '').replace(/\D+/g, '')
 }
 
-/** O número (já resolvido) é de alguém autorizado a comandar o bot? */
-function ehComando(fromNum, chat) {
-  if (chat.isGroup) return false
+/** O número (ou ID) é de alguém autorizado a comandar o bot? */
+function numeroAutorizado(fromNum) {
   const autorizados = (cfg().controleNumeros || []).map(soDigitos).filter(Boolean)
   if (!autorizados.length) return false
   // Compara pelos últimos 8 dígitos (ignora 55/DDD e o 9º dígito que o WhatsApp
-  // às vezes acrescenta/remove nos números do Brasil).
+  // às vezes acrescenta/remove nos números do Brasil; serve também p/ o @lid).
   const tail = (s) => String(s).slice(-8)
   return autorizados.some((n) => tail(n).length === 8 && tail(n) === tail(fromNum))
+}
+
+/** Comando privado de número autorizado? */
+function ehComando(fromNum, chat) {
+  return !chat.isGroup && numeroAutorizado(fromNum)
 }
 
 /** Resume um grupo: busca as mensagens recentes e pede o resumo ao hub. */
@@ -213,8 +235,11 @@ async function notificarDemandasLoop() {
   try {
     const c = cfg()
     const admins = (c.controleNumeros || []).map(soDigitos).filter(Boolean)
+    // Destinos: chats de admin já conhecidos (funciona com @lid) ou, como
+    // fallback, os números configurados no formato @c.us.
+    const destinos = adminChats.size ? [...adminChats] : admins.map((n) => `${n}@c.us`)
 
-    if (c.notificarDemandas !== false && admins.length) {
+    if (c.notificarDemandas !== false && destinos.length) {
       const res = await fetch(
         `${config.hubUrl}/api/robo/demandas-novas?token=${encodeURIComponent(config.ingestToken)}`,
       )
@@ -233,9 +258,9 @@ async function notificarDemandasLoop() {
           linhas.push('', `Responda aqui pra agir (ex: "marca a demanda ${d.id} como resolvida").`)
           const texto = linhas.join('\n')
 
-          for (const num of admins) {
+          for (const dest of destinos) {
             try {
-              await client.sendMessage(`${num}@c.us`, texto)
+              await client.sendMessage(dest, texto)
             } catch (e) {
               console.warn('⚠️ Falha ao avisar admin:', e.message)
             }
@@ -254,7 +279,8 @@ async function notificarDemandasLoop() {
 // (ex: pedir confirmação e você responder "confirmo").
 const historicos = new Map()
 
-async function askAssistente(msg) {
+async function askAssistente(msg, textoOverride = null) {
+  const pergunta = (textoOverride ?? msg.body ?? '').trim()
   const chave = soDigitos(msg.from)
   const hist = historicos.get(chave) || []
 
@@ -267,13 +293,13 @@ async function askAssistente(msg) {
     const res = await fetch(`${config.hubUrl}/api/robo/assistente`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: config.ingestToken, mensagem: msg.body, historico: hist }),
+      body: JSON.stringify({ token: config.ingestToken, mensagem: pergunta, historico: hist }),
     })
     const data = await res.json().catch(() => ({}))
     const resposta = data.resposta || '⚠️ Não consegui responder agora.'
 
     // Atualiza o histórico (mantém curto).
-    hist.push({ role: 'user', content: msg.body }, { role: 'assistant', content: resposta })
+    hist.push({ role: 'user', content: pergunta }, { role: 'assistant', content: resposta })
     while (hist.length > 10) hist.shift()
     historicos.set(chave, hist)
 
@@ -313,6 +339,7 @@ client.on('authenticated', () => console.log('✅ Autenticado.'))
 client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m))
 client.on('ready', () => {
   whatsappReady = true
+  botId = client.info?.wid?._serialized || null // id do próprio bot (p/ detectar @menção)
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
   reportarGrupos() // manda a lista de grupos pro painel
@@ -364,8 +391,25 @@ client.on('message', async (msg) => {
     // COMANDO: mensagem privada de um número autorizado -> trata e responde
     // aqui mesmo (não segue para a lógica de demandas).
     if (ehComando(fromNum, chat)) {
+      lembrarAdmin(msg.from) // guarda o chat p/ enviar avisos depois
       await tratarComando(msg)
       return
+    }
+
+    // GRUPO: se um número autorizado MARCAR o bot (@bot ou menção do número),
+    // ele responde no grupo com a IA. Senão, segue como demanda normal.
+    if (chat.isGroup) {
+      const texto = (msg.body || '').trim()
+      const mencionado =
+        (botId && (msg.mentionedIds || []).map(String).includes(botId)) ||
+        /(^|\s)@?bot\b/i.test(texto)
+      if (mencionado && numeroAutorizado(fromNum)) {
+        lembrarAdmin(msg.from)
+        // tira o "@bot"/menções do texto antes de perguntar à IA
+        const pergunta = texto.replace(/@?bot\b/i, '').replace(/@\d+/g, '').trim()
+        await askAssistente(msg, pergunta || texto)
+        return
+      }
     }
 
     // Só grupos (se configurado assim).
