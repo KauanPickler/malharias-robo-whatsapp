@@ -159,6 +159,29 @@ function ehComando(fromNum, chat) {
   return !chat.isGroup && numeroAutorizado(fromNum)
 }
 
+/** O bot foi marcado (@menção) nesta mensagem? Resolve o lid -> número do bot. */
+async function botFoiMencionado(msg, texto) {
+  if (/(^|\s)@?bot\b/i.test(texto || '')) return true
+  const ids = msg.mentionedIds || []
+  if (!ids.length) return false
+  const botTails = [...botIds].map((b) => b.slice(-8))
+  for (const raw of ids) {
+    const sid = typeof raw === 'string' ? raw : raw?._serialized || String(raw)
+    // match direto (caso o mention seja pelo número do bot)
+    if (botTails.includes(soDigitos(sid).slice(-8))) return true
+    // resolve o contato da menção e compara o número com o do bot
+    try {
+      const c = await client.getContactById(sid)
+      const num = soDigitos(String(c?.number || c?.id?.user || ''))
+      if (num && botTails.includes(num.slice(-8))) {
+        lembrarBotId(soDigitos(sid)) // memoriza o lid do bot p/ próximas vezes
+        return true
+      }
+    } catch {}
+  }
+  return false
+}
+
 /** Resume um grupo: busca as mensagens recentes e pede o resumo ao hub. */
 async function resumirGrupo(nomeGrupo) {
   const chats = await client.getChats()
@@ -433,24 +456,20 @@ client.on('message', async (msg) => {
     // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
-      // Tails (últimos 8 dígitos) de todos os ids conhecidos do bot (número + @lid).
-      const botTails = [...botIds].map((b) => b.slice(-8)).filter((t) => t.length === 8)
-      const textoDig = soDigitos(texto)
-      const mencionou =
-        (msg.mentionedIds || []).some((id) => botTails.includes(soDigitos(String(id)).slice(-8))) ||
-        botTails.some((t) => textoDig.includes(t)) ||
-        /(^|\s)@?bot\b/i.test(texto)
+      const mencionou = await botFoiMencionado(msg, texto)
 
       if (mencionou) {
         const ok = numeroAutorizado(fromNum)
-        console.log(`   ↳ bot MARCADO no grupo | de=${fromNum} | autorizado=${ok} | mentions=${JSON.stringify(msg.mentionedIds || [])}`)
+        console.log(`   ↳ bot MARCADO no grupo | de=${fromNum} | autorizado=${ok}`)
         if (ok) {
           lembrarAdmin(msg.from)
           // tira menções (@número / @bot) do texto antes de perguntar à IA
           const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
           await askAssistente(msg, pergunta || texto)
         } else {
-          await msg.reply('🔒 Só números autorizados podem me comandar. Peça pra adicionar seu número no painel (Robô & IA).')
+          await msg.reply(
+            `🔒 Você não está autorizado a me comandar.\nSeu ID neste grupo: *${fromNum}*\nAdicione ele no painel (Robô & IA → números de controle).`,
+          )
         }
         return // marcado nunca vira demanda
       }
