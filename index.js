@@ -347,6 +347,12 @@ client.on('message', async (msg) => {
     const chat = await msg.getChat()
     const c = cfg()
 
+    // Log de depuração: mostra toda mensagem recebida.
+    console.log(
+      `📩 ${chat.isGroup ? 'GRUPO "' + (chat.name || '?') + '"' : 'PRIVADO'} de ${soDigitos(msg.from)}` +
+        ` | comando=${ehComando(msg, chat)} | "${(msg.body || '').slice(0, 60)}"`,
+    )
+
     // COMANDO: mensagem privada de um número autorizado -> trata e responde
     // aqui mesmo (não segue para a lógica de demandas).
     if (ehComando(msg, chat)) {
