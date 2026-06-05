@@ -357,7 +357,16 @@ client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m
 client.on('ready', () => {
   whatsappReady = true
   botId = client.info?.wid?._serialized || null // id do próprio bot (p/ detectar @menção)
-  lembrarBotId(botId)
+  // Captura todos os ids possíveis do bot (número e @lid).
+  const idsBot = [
+    client.info?.wid?._serialized,
+    client.info?.wid?.user,
+    client.info?.me?._serialized,
+    client.info?.lid?._serialized,
+    client.info?.lid?.user,
+  ]
+  idsBot.forEach(lembrarBotId)
+  console.log('ℹ️ ids do bot:', JSON.stringify(idsBot), '| botIds=', JSON.stringify([...botIds]))
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
   reportarGrupos() // manda a lista de grupos pro painel
@@ -406,7 +415,10 @@ client.on('message', async (msg) => {
     // Log de depuração: mostra toda mensagem recebida.
     console.log(
       `📩 ${chat.isGroup ? 'GRUPO "' + (chat.name || '?') + '"' : 'PRIVADO'} de ${fromNum}` +
-        ` (from=${soDigitos(msg.from)}) | comando=${ehComando(fromNum, chat)} | "${(msg.body || '').slice(0, 60)}"`,
+        ` (from=${soDigitos(msg.from)}, to=${soDigitos(String(msg.to || ''))})` +
+        ` | comando=${ehComando(fromNum, chat)}` +
+        (chat.isGroup ? ` | mentions=${JSON.stringify(msg.mentionedIds || [])} | botIds=${JSON.stringify([...botIds])}` : '') +
+        ` | "${(msg.body || '').slice(0, 50)}"`,
     )
 
     // COMANDO: mensagem privada de um número autorizado -> trata e responde
