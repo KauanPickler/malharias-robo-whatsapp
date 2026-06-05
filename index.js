@@ -109,16 +109,15 @@ function soDigitos(s) {
   return String(s || '').replace(/\D+/g, '')
 }
 
-/** A mensagem privada veio de um número autorizado a comandar o bot? */
-function ehComando(msg, chat) {
+/** O número (já resolvido) é de alguém autorizado a comandar o bot? */
+function ehComando(fromNum, chat) {
   if (chat.isGroup) return false
   const autorizados = (cfg().controleNumeros || []).map(soDigitos).filter(Boolean)
   if (!autorizados.length) return false
-  const de = soDigitos(msg.from)
   // Compara pelos últimos 8 dígitos (ignora 55/DDD e o 9º dígito que o WhatsApp
   // às vezes acrescenta/remove nos números do Brasil).
   const tail = (s) => String(s).slice(-8)
-  return autorizados.some((n) => tail(n).length === 8 && tail(n) === tail(de))
+  return autorizados.some((n) => tail(n).length === 8 && tail(n) === tail(fromNum))
 }
 
 /** Resume um grupo: busca as mensagens recentes e pede o resumo ao hub. */
@@ -347,15 +346,24 @@ client.on('message', async (msg) => {
     const chat = await msg.getChat()
     const c = cfg()
 
+    // Resolve o número REAL do remetente. O msg.from às vezes vem como @lid
+    // (um ID aleatório do WhatsApp), então pegamos o telefone pelo contato.
+    let fromNum = soDigitos(msg.from)
+    try {
+      const contato = await msg.getContact()
+      const n = contato?.number || contato?.id?.user
+      if (n) fromNum = soDigitos(n)
+    } catch {}
+
     // Log de depuração: mostra toda mensagem recebida.
     console.log(
-      `📩 ${chat.isGroup ? 'GRUPO "' + (chat.name || '?') + '"' : 'PRIVADO'} de ${soDigitos(msg.from)}` +
-        ` | comando=${ehComando(msg, chat)} | "${(msg.body || '').slice(0, 60)}"`,
+      `📩 ${chat.isGroup ? 'GRUPO "' + (chat.name || '?') + '"' : 'PRIVADO'} de ${fromNum}` +
+        ` (from=${soDigitos(msg.from)}) | comando=${ehComando(fromNum, chat)} | "${(msg.body || '').slice(0, 60)}"`,
     )
 
     // COMANDO: mensagem privada de um número autorizado -> trata e responde
     // aqui mesmo (não segue para a lógica de demandas).
-    if (ehComando(msg, chat)) {
+    if (ehComando(fromNum, chat)) {
       await tratarComando(msg)
       return
     }
