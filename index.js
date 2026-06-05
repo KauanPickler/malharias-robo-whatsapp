@@ -32,6 +32,23 @@ function lembrarAdmin(id) {
   }
 }
 
+// IDs do próprio bot (número e @lid). Usado pra detectar quando marcam o bot
+// num grupo. Aprende o @lid pelas mensagens privadas (destino = o próprio bot).
+const BOTIDS_FILE = './bot-ids.json'
+let botIds = new Set()
+try {
+  if (existsSync(BOTIDS_FILE)) botIds = new Set(JSON.parse(readFileSync(BOTIDS_FILE, 'utf8')))
+} catch {}
+function lembrarBotId(raw) {
+  const d = String(raw || '').replace(/\D/g, '')
+  if (d.length >= 8 && !botIds.has(d)) {
+    botIds.add(d)
+    try {
+      writeFileSync(BOTIDS_FILE, JSON.stringify([...botIds]))
+    } catch {}
+  }
+}
+
 let config
 try {
   config = (await import('./config.js')).default
@@ -340,6 +357,7 @@ client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m
 client.on('ready', () => {
   whatsappReady = true
   botId = client.info?.wid?._serialized || null // id do próprio bot (p/ detectar @menção)
+  lembrarBotId(botId)
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
   reportarGrupos() // manda a lista de grupos pro painel
@@ -382,6 +400,9 @@ client.on('message', async (msg) => {
       if (n) fromNum = soDigitos(n)
     } catch {}
 
+    // Em mensagem privada, o destino (msg.to) é o próprio bot — aprende o id/lid dele.
+    if (!chat.isGroup && msg.to) lembrarBotId(msg.to)
+
     // Log de depuração: mostra toda mensagem recebida.
     console.log(
       `📩 ${chat.isGroup ? 'GRUPO "' + (chat.name || '?') + '"' : 'PRIVADO'} de ${fromNum}` +
@@ -400,10 +421,12 @@ client.on('message', async (msg) => {
     // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
-      const botTail = soDigitos(String(client.info?.wid?._serialized || botId || '')).slice(-8)
+      // Tails (últimos 8 dígitos) de todos os ids conhecidos do bot (número + @lid).
+      const botTails = [...botIds].map((b) => b.slice(-8)).filter((t) => t.length === 8)
+      const textoDig = soDigitos(texto)
       const mencionou =
-        (botTail && (msg.mentionedIds || []).some((id) => soDigitos(String(id)).endsWith(botTail))) ||
-        (botTail && soDigitos(texto).includes(botTail)) ||
+        (msg.mentionedIds || []).some((id) => botTails.includes(soDigitos(String(id)).slice(-8))) ||
+        botTails.some((t) => textoDig.includes(t)) ||
         /(^|\s)@?bot\b/i.test(texto)
 
       if (mencionou) {
