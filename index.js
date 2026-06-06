@@ -15,6 +15,7 @@ import pkg from 'whatsapp-web.js'
 const { Client, LocalAuth } = pkg
 import qrcode from 'qrcode-terminal'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { spawn } from 'child_process'
 
 // Guarda os chats dos admins (quem comanda o bot) para enviar avisos.
 // Persiste em arquivo pra sobreviver a reinício.
@@ -68,9 +69,14 @@ if (!config.ingestToken || config.ingestToken.includes('COLE_AQUI')) {
 // flags de transcrição etc. são gerenciados no painel e buscados aqui.
 let remote = {}
 
+// Auto-update: baseline do "update_nonce" que vem do hub. Definido no boot com o
+// valor atual (então o boot nunca dispara). Quando o admin clica "Atualizar robô"
+// no painel, o nonce muda -> o robô puxa o código e reinicia sozinho.
+let updateBaseline = null
+
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -90,6 +96,33 @@ async function heartbeatLoop() {
     })
   } catch {}
   setTimeout(heartbeatLoop, 60000) // a cada 60s
+}
+
+/**
+ * Dispara o auto-update em um processo separado (detached), pra ele sobreviver
+ * ao reinício do próprio robô. Faz: git pull + npm install + pm2 restart.
+ */
+function rodarUpdate() {
+  try {
+    const cmd = 'git pull --ff-only && PUPPETEER_SKIP_DOWNLOAD=true npm install --no-audit --no-fund && pm2 restart malharias-robo'
+    const child = spawn('bash', ['-lc', cmd], { detached: true, stdio: 'ignore' })
+    child.unref()
+  } catch (e) {
+    console.error('❌ Falha ao iniciar o auto-update:', e.message)
+  }
+}
+
+/** Checa o nonce de atualização vindo do hub; se mudou, atualiza e reinicia. */
+async function autoUpdateLoop() {
+  try {
+    const atual = remote?.update_nonce ?? null
+    if (atual !== null && String(atual) !== String(updateBaseline)) {
+      updateBaseline = atual // marca como aplicado (evita repetir se o restart demorar)
+      console.log('🔄 Atualização solicitada pelo hub — git pull + npm install + restart...')
+      rodarUpdate()
+    }
+  } catch {}
+  setTimeout(autoUpdateLoop, 30000) // checa a cada 30s
 }
 
 async function carregarConfigRemota() {
@@ -681,6 +714,11 @@ async function enviarAoHub(payload) {
 // Busca a config do hub antes de iniciar e renova a cada 1 min.
 await carregarConfigRemota()
 setInterval(carregarConfigRemota, 60_000)
+
+// Baseline do auto-update = estado atual (boot nunca dispara). Depois, qualquer
+// mudança do nonce (botão "Atualizar robô" no painel) faz o robô se atualizar.
+updateBaseline = remote?.update_nonce ?? null
+autoUpdateLoop()
 
 // Começa a reportar o estado ao hub (mesmo antes do WhatsApp conectar).
 heartbeatLoop()
