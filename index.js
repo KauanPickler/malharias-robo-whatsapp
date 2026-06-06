@@ -230,9 +230,27 @@ async function listarGrupos() {
   return grupos.length ? `*Grupos disponíveis:*\n${grupos.slice(0, 60).join('\n')}` : 'Nenhum grupo encontrado.'
 }
 
+/** Transcreve um áudio recebido (comando por voz) usando o hub. */
+async function transcreverAudio(msg) {
+  try {
+    const media = await msg.downloadMedia()
+    if (!media?.data) return ''
+    const res = await fetch(`${config.hubUrl}/api/robo/transcrever`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, media_base64: media.data, media_mime: media.mimetype || '', media_type: 'audio' }),
+    })
+    const data = await res.json().catch(() => ({}))
+    return (data.texto || '').trim()
+  } catch (e) {
+    console.warn('⚠️ Falha ao transcrever áudio:', e.message)
+    return ''
+  }
+}
+
 /** Interpreta e executa um comando recebido por mensagem privada. */
-async function tratarComando(msg) {
-  const texto = (msg.body || '').trim()
+async function tratarComando(msg, textoOverride = null) {
+  const texto = (textoOverride ?? msg.body ?? '').trim()
   const lower = texto.toLowerCase()
 
   if (lower === 'ajuda' || lower === '/ajuda' || lower === 'help' || lower === 'menu') {
@@ -268,7 +286,7 @@ async function tratarComando(msg) {
 
   // Qualquer outra coisa vai para a IA do hub (mesma do chat do painel):
   // ela pode ver máquinas, criar demanda, fazer deploy, etc.
-  return askAssistente(msg)
+  return askAssistente(msg, texto)
 }
 
 /**
@@ -317,6 +335,50 @@ async function notificarDemandasLoop() {
   }
 
   setTimeout(notificarDemandasLoop, 60000) // a cada 60s
+}
+
+/** Envia um texto num grupo (pelo nome). */
+async function enviarNoGrupo(nome, texto) {
+  try {
+    const chats = await client.getChats()
+    const alvo = nome.toLowerCase()
+    const g =
+      chats.find((c) => c.isGroup && (c.name || '').toLowerCase() === alvo) ||
+      chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(alvo))
+    if (g) await client.sendMessage(g.id._serialized, texto)
+  } catch (e) {
+    console.warn('⚠️ Falha ao enviar no grupo:', e.message)
+  }
+}
+
+/**
+ * Busca avisos do hub (alertas, resumo, lembretes, "resolvido no grupo") e
+ * envia no WhatsApp — pro admin (privado) ou no grupo indicado.
+ */
+async function avisosLoop() {
+  try {
+    const res = await fetch(`${config.hubUrl}/api/robo/avisos?token=${encodeURIComponent(config.ingestToken)}`)
+    if (res.ok) {
+      const data = await res.json()
+      for (const a of data.avisos || []) {
+        if (a.grupo) {
+          await enviarNoGrupo(a.grupo, a.texto)
+        } else {
+          for (const dest of adminChats) {
+            try {
+              await client.sendMessage(dest, a.texto)
+            } catch (e) {
+              console.warn('⚠️ Falha ao avisar admin:', e.message)
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ Erro ao buscar avisos:', e.message)
+  }
+
+  setTimeout(avisosLoop, 60000) // a cada 60s
 }
 
 // Histórico de conversa por número (em memória), p/ a IA lembrar do contexto
@@ -432,6 +494,7 @@ client.on('ready', () => {
   console.log('ℹ️ ids do bot:', JSON.stringify(idsBot), '| botIds=', JSON.stringify([...botIds]))
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
+  avisosLoop() // alertas/resumo/lembretes/resolvido-no-grupo
   reportarGrupos() // manda a lista de grupos pro painel
   setInterval(reportarGrupos, 5 * 60 * 1000) // atualiza a cada 5 min
 })
@@ -488,7 +551,13 @@ client.on('message', async (msg) => {
     // aqui mesmo (não segue para a lógica de demandas).
     if (ehComando(fromNum, chat)) {
       lembrarAdmin(msg.from) // guarda o chat p/ enviar avisos depois
-      await tratarComando(msg)
+      let comando = (msg.body || '').trim()
+      // Comando por VOZ: se mandou áudio, transcreve antes.
+      if (!comando && msg.hasMedia && mapTipoMidia(msg.type) === 'audio') {
+        comando = await transcreverAudio(msg)
+        if (comando) await msg.reply(`🎙️ _"${comando}"_`)
+      }
+      await tratarComando(msg, comando)
       return
     }
 
