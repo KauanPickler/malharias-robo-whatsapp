@@ -304,6 +304,13 @@ async function tratarComando(msg, textoOverride = null) {
     return msg.reply(await listarGrupos())
   }
 
+  // Versão do robô — pra conferir se o Raspberry está rodando o código atualizado.
+  if (lower.includes('versão') || lower.includes('versao') || lower.includes('version')) {
+    const up = Math.round(process.uptime())
+    const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60)
+    return msg.reply(`🤖 *Robô Malharias*\nVersão: *${VERSION}*\nNo ar há ${h}h ${m}m`)
+  }
+
   // "resumo do grupo X" / "/resumo X" / "resumir grupo X"
   const idx = lower.indexOf('grupo')
   let nome = null
