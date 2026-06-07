@@ -76,7 +76,7 @@ let updateBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.1.0'
+const VERSION = '1.2.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -195,13 +195,15 @@ function ehComando(fromNum, chat) {
 /** O bot foi marcado (@menção) nesta mensagem? Resolve o lid -> número do bot. */
 async function botFoiMencionado(msg, texto) {
   const t = (texto || '').trim()
-  // Mensagem que COMEÇA marcando alguém (@...) num grupo = comando pro bot.
-  // (a autorização é checada depois, então só quem pode comandar dispara)
-  if (/^@/.test(t)) return true
-  if (/(^|\s)@?bot\b/i.test(t)) return true
+  // Menção textual EXPLÍCITA "@bot" (quando não vira menção real do WhatsApp).
+  // OBS: NÃO tratamos "qualquer @" como menção — senão marcar outra pessoa no
+  // grupo fazia o bot achar que era com ele.
+  if (/@bot\b/i.test(t)) return true
+  // Menção REAL do WhatsApp: algum dos mentionedIds tem que ser o próprio bot.
   const ids = msg.mentionedIds || []
   if (!ids.length) return false
-  const botTails = [...botIds].map((b) => b.slice(-8))
+  const botTails = [...botIds].map((b) => b.slice(-8)).filter(Boolean)
+  if (!botTails.length) return false
   for (const raw of ids) {
     const sid = typeof raw === 'string' ? raw : raw?._serialized || String(raw)
     // match direto (caso o mention seja pelo número do bot)
@@ -290,7 +292,9 @@ async function tratarComando(msg, textoOverride = null) {
     return msg.reply(
       '🤖 *Posso te ajudar com:*\n' +
         '• *resumo do grupo NOME* — resumo das mensagens do grupo\n' +
-        '• *grupos* — lista os grupos disponíveis\n\n' +
+        '• *grupos* — lista os grupos disponíveis\n' +
+        '• *versão* — mostra a versão do robô\n' +
+        '• *reset* — limpa a conversa se eu travar\n\n' +
         'E qualquer coisa do sistema, é só pedir. Ex:\n' +
         '• "status das máquinas da JM"\n' +
         '• "quais demandas estão abertas?"\n' +
@@ -425,6 +429,7 @@ async function avisosLoop() {
 // (ex: pedir confirmação e você responder "confirmo").
 const historicos = new Map()
 const pendentes = new Map() // chave do chat -> ação pendente de confirmação
+const falhasSeguidas = new Map() // chave do chat -> nº de falhas seguidas (anti-travamento)
 
 /** Executa direto a ação pendente (já confirmada) — sem depender da IA lembrar. */
 async function executarPendente(msg, pend) {
@@ -445,9 +450,22 @@ async function executarPendente(msg, pend) {
   }
 }
 
+/** Limpa o contexto (histórico + pendência + contador de falhas) de um chat. */
+function resetarConversa(chave) {
+  historicos.delete(chave)
+  pendentes.delete(chave)
+  falhasSeguidas.delete(chave)
+}
+
 async function askAssistente(msg, textoOverride = null) {
   const pergunta = (textoOverride ?? msg.body ?? '').trim()
   const chave = soDigitos(msg.from)
+
+  // Comando pra DESTRAVAR manualmente: zera a conversa desse chat.
+  if (/^(reset|recome[çc]ar|limpar|esquece tudo|come[çc]ar de novo)\b/i.test(pergunta)) {
+    resetarConversa(chave)
+    return msg.reply('🧹 Limpei nossa conversa. Pode mandar de novo. 👍')
+  }
 
   // Há ação pendente? Confirmação -> executa direto; negação -> cancela.
   const pend = pendentes.get(chave)
@@ -467,27 +485,48 @@ async function askAssistente(msg, textoOverride = null) {
     chat.sendStateTyping() // mostra "digitando..." enquanto a IA pensa
   } catch {}
 
+  // Anti-travamento: em qualquer falha, NÃO suja o histórico. Conta as falhas
+  // seguidas e, se repetir, reseta a conversa sozinho (antes ficava preso pra
+  // sempre porque o histórico ruim era reenviado a cada mensagem).
+  const aoFalhar = (texto) => {
+    const n = (falhasSeguidas.get(chave) || 0) + 1
+    if (n >= 2) {
+      resetarConversa(chave)
+      return msg.reply('⚠️ Tive um problema e reiniciei nossa conversa pra destravar. Pode mandar de novo? 🙏')
+    }
+    falhasSeguidas.set(chave, n)
+    return msg.reply(texto)
+  }
+
   try {
     const res = await fetch(`${config.hubUrl}/api/robo/assistente`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: config.ingestToken, mensagem: pergunta, historico: hist }),
+      signal: AbortSignal.timeout(45000), // não trava esperando o hub pra sempre
     })
-    const data = await res.json().catch(() => ({}))
-    const resposta = data.resposta || '⚠️ Não consegui responder agora.'
+    if (!res.ok) return aoFalhar(`⚠️ O hub respondeu com erro (${res.status}). Tenta de novo em instantes.`)
+
+    const data = await res.json().catch(() => null)
+    const resposta = data && data.resposta ? data.resposta : null
+    if (!resposta) return aoFalhar('⚠️ Não consegui responder agora. Tenta de novo em instantes.')
+
+    // Sucesso: zera o contador de falhas.
+    falhasSeguidas.delete(chave)
 
     // Guarda (ou limpa) a ação pendente de confirmação.
     if (data.pending_action) pendentes.set(chave, data.pending_action)
     else pendentes.delete(chave)
 
-    // Atualiza o histórico (mantém curto).
+    // Atualiza o histórico SÓ no sucesso (mantém curto).
     hist.push({ role: 'user', content: pergunta }, { role: 'assistant', content: resposta })
     while (hist.length > 10) hist.shift()
     historicos.set(chave, hist)
 
     return msg.reply(resposta)
   } catch (e) {
-    return msg.reply('⚠️ Erro ao falar com o hub: ' + e.message)
+    const motivo = e.name === 'TimeoutError' ? 'o hub demorou demais' : e.message
+    return aoFalhar(`⚠️ O hub não respondeu agora (${motivo}). Tenta de novo em instantes.`)
   }
 }
 
