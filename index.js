@@ -73,10 +73,12 @@ let remote = {}
 // valor atual (então o boot nunca dispara). Quando o admin clica "Atualizar robô"
 // no painel, o nonce muda -> o robô puxa o código e reinicia sozinho.
 let updateBaseline = null
+// Reinício remoto: baseline do "restart_nonce". Botão "Reiniciar robô" no painel.
+let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.2.0'
+const VERSION = '1.3.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -112,14 +114,20 @@ function rodarUpdate() {
   }
 }
 
-/** Checa o nonce de atualização vindo do hub; se mudou, atualiza e reinicia. */
+/** Checa os nonces de atualização/reinício vindos do hub; age se mudarem. */
 async function autoUpdateLoop() {
   try {
-    const atual = remote?.update_nonce ?? null
-    if (atual !== null && String(atual) !== String(updateBaseline)) {
-      updateBaseline = atual // marca como aplicado (evita repetir se o restart demorar)
+    const upd = remote?.update_nonce ?? null
+    if (upd !== null && String(upd) !== String(updateBaseline)) {
+      updateBaseline = upd // marca como aplicado (evita repetir se o restart demorar)
       console.log('🔄 Atualização solicitada pelo hub — git pull + npm install + restart...')
       rodarUpdate()
+    }
+    const rst = remote?.restart_nonce ?? null
+    if (rst !== null && String(rst) !== String(restartBaseline)) {
+      restartBaseline = rst
+      console.log('♻️ Reinício solicitado pelo hub — saindo para o pm2 reerguer...')
+      setTimeout(() => process.exit(0), 500) // pm2 (autorestart) sobe de novo
     }
   } catch {}
   setTimeout(autoUpdateLoop, 30000) // checa a cada 30s
@@ -764,9 +772,10 @@ async function enviarAoHub(payload) {
 await carregarConfigRemota()
 setInterval(carregarConfigRemota, 60_000)
 
-// Baseline do auto-update = estado atual (boot nunca dispara). Depois, qualquer
-// mudança do nonce (botão "Atualizar robô" no painel) faz o robô se atualizar.
+// Baseline do auto-update/reinício = estado atual (boot nunca dispara). Depois,
+// mudança de nonce (botões "Atualizar/Reiniciar robô" no painel) age sozinho.
 updateBaseline = remote?.update_nonce ?? null
+restartBaseline = remote?.restart_nonce ?? null
 autoUpdateLoop()
 
 // Começa a reportar o estado ao hub (mesmo antes do WhatsApp conectar).
