@@ -4,3 +4,4 @@ config.js
 .DS_Store
 admin-chats.json
 bot-ids.json
+qr-latest.txt
