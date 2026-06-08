@@ -554,6 +554,9 @@ const client = new Client({
 client.on('qr', (qr) => {
   console.log('\n📱 Escaneie o QR code abaixo com o WhatsApp do CHIP DEDICADO:\n')
   qrcode.generate(qr, { small: true })
+  // Salva o QR puro em arquivo — permite gerar a imagem do QR pra parear
+  // remotamente (sem depender do ASCII do log, que vem "sujo" pelo pm2).
+  try { writeFileSync('qr-latest.txt', qr) } catch {}
 })
 
 client.on('authenticated', () => console.log('✅ Autenticado.'))
