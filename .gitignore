@@ -5,3 +5,5 @@ config.js
 admin-chats.json
 bot-ids.json
 qr-latest.txt
+pair-number.txt
+pair-code.txt

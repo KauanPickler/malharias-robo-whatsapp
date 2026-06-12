@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.3.0'
+const VERSION = '1.4.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -559,7 +559,24 @@ const client = new Client({
   puppeteer: puppeteerOpts,
 })
 
-client.on('qr', (qr) => {
+let pairCodeRequested = false
+client.on('qr', async (qr) => {
+  // Modo "conectar por código" (sem escanear QR): se existir o arquivo
+  // pair-number.txt com o número, pede um código de pareamento de 8 dígitos.
+  // Útil quando não dá pra apontar a câmera pra tela (acesso remoto).
+  if (!pairCodeRequested && existsSync('pair-number.txt')) {
+    pairCodeRequested = true
+    try {
+      const numero = readFileSync('pair-number.txt', 'utf8').replace(/\D/g, '')
+      const code = await client.requestPairingCode(numero)
+      console.log(`\n🔢 CÓDIGO DE PAREAMENTO (${numero}): ${code}`)
+      console.log('   No WhatsApp do número: Aparelhos conectados → Conectar um aparelho → "Conectar com número de telefone" → digite o código.\n')
+      try { writeFileSync('pair-code.txt', code) } catch {}
+      return
+    } catch (e) {
+      console.error('⚠️ Falha ao pedir código de pareamento:', e.message, '— caindo pro QR.')
+    }
+  }
   console.log('\n📱 Escaneie o QR code abaixo com o WhatsApp do CHIP DEDICADO:\n')
   qrcode.generate(qr, { small: true })
   // Salva o QR puro em arquivo — permite gerar a imagem do QR pra parear
