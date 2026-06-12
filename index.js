@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.4.0'
+const VERSION = '1.5.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -288,6 +288,29 @@ async function transcreverAudio(msg) {
   } catch (e) {
     console.warn('⚠️ Falha ao transcrever áudio:', e.message)
     return ''
+  }
+}
+
+/** Lê um documento/imagem (PDF, Nota Fiscal, boleto...) e extrai os campos via IA. */
+async function lerDocumento(msg) {
+  try {
+    await msg.reply('📄 Lendo o documento e extraindo os campos...')
+    const media = await msg.downloadMedia()
+    if (!media?.data) return msg.reply('⚠️ Não consegui baixar o documento.')
+    const res = await fetch(`${config.hubUrl}/api/robo/documento`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: config.ingestToken,
+        media_base64: media.data,
+        media_mime: media.mimetype || '',
+        filename: media.filename || '',
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    return msg.reply(data.texto || '⚠️ Não consegui ler o documento agora.')
+  } catch (e) {
+    return msg.reply('⚠️ Erro ao ler o documento: ' + e.message)
   }
 }
 
@@ -663,6 +686,11 @@ client.on('message', async (msg) => {
       if (!comando && msg.hasMedia && mapTipoMidia(msg.type) === 'audio') {
         comando = await transcreverAudio(msg)
         if (comando) await msg.reply(`🎙️ _"${comando}"_`)
+      }
+      // DOCUMENTO/IMAGEM (PDF, Nota Fiscal, boleto...): lê e extrai os campos.
+      if (msg.hasMedia && (msg.type === 'document' || mapTipoMidia(msg.type) === 'image')) {
+        await lerDocumento(msg)
+        return
       }
       await tratarComando(msg, comando)
       return
