@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.5.0'
+const VERSION = '1.6.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -577,9 +577,27 @@ if (config.chromiumPath) {
   puppeteerOpts.executablePath = config.chromiumPath
 }
 
+// Fixa a versão do WhatsApp Web (workaround p/ o "Execution context destroyed"
+// quando o WhatsApp Web atualiza e quebra o whatsapp-web.js). Se existir o
+// arquivo web-version.txt com um número (ex: 2.3000.1041450038-alpha), usa ele.
+let webVersionCache = { type: 'local' }
+try {
+  if (existsSync('web-version.txt')) {
+    const v = readFileSync('web-version.txt', 'utf8').trim()
+    if (v) {
+      webVersionCache = {
+        type: 'remote',
+        remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${v}.html`,
+      }
+      console.log(`📌 Fixando WhatsApp Web na versão ${v}`)
+    }
+  }
+} catch {}
+
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './sessao' }), // sessão persistente
   puppeteer: puppeteerOpts,
+  webVersionCache,
 })
 
 let pairCodeRequested = false
