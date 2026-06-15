@@ -292,6 +292,9 @@ async function transcreverAudio(msg) {
 }
 
 /** Lê um documento/imagem (PDF, Nota Fiscal, boleto...) e extrai os campos via IA. */
+// Documentos lidos aguardando o usuário confirmar se quer salvar (chat -> dados).
+const pendentesDoc = new Map()
+
 async function lerDocumento(msg) {
   try {
     await msg.reply('📄 Lendo o documento e extraindo os campos...')
@@ -308,9 +311,33 @@ async function lerDocumento(msg) {
       }),
     })
     const data = await res.json().catch(() => ({}))
-    return msg.reply(data.texto || '⚠️ Não consegui ler o documento agora.')
+    const texto = data.texto || '⚠️ Não consegui ler o documento agora.'
+
+    // Se for nota fiscal ou boleto, NÃO salva sozinho — pergunta antes.
+    if (data.eh_nota_fiscal || data.eh_boleto) {
+      pendentesDoc.set(soDigitos(msg.from), { nf: data.nf, base64: media.data, mime: media.mimetype || '' })
+      const onde = data.eh_boleto ? '*Contas a pagar*' : '*Notas*'
+      return msg.reply(`${texto}\n\n💾 Quer que eu salve em ${onde} no painel? Responda *sim* ou *não*.`)
+    }
+
+    return msg.reply(texto)
   } catch (e) {
     return msg.reply('⚠️ Erro ao ler o documento: ' + e.message)
+  }
+}
+
+/** Salva o documento pendente (nota/boleto) depois do usuário confirmar "sim". */
+async function salvarDocumento(msg, pend) {
+  try {
+    const res = await fetch(`${config.hubUrl}/api/robo/salvar-documento`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, nf: pend.nf, media_base64: pend.base64, media_mime: pend.mime }),
+    })
+    const data = await res.json().catch(() => ({}))
+    return msg.reply(data.texto || '⚠️ Não consegui salvar agora.')
+  } catch (e) {
+    return msg.reply('⚠️ Erro ao salvar: ' + e.message)
   }
 }
 
@@ -700,6 +727,24 @@ client.on('message', async (msg) => {
     if (ehComando(fromNum, chat)) {
       lembrarAdmin(msg.from) // guarda o chat p/ enviar avisos depois
       let comando = (msg.body || '').trim()
+
+      // Resposta a "quer salvar o documento?" (nota/boleto pendente).
+      if (!msg.hasMedia) {
+        const pdoc = pendentesDoc.get(soDigitos(msg.from))
+        if (pdoc) {
+          if (/^(sim|salva|salvar|pode|isso|ok|confirmo|claro|👍)\b/i.test(comando)) {
+            pendentesDoc.delete(soDigitos(msg.from))
+            await salvarDocumento(msg, pdoc)
+            return
+          }
+          if (/^(n[ãa]o|nao|deixa|cancela|descarta)\b/i.test(comando)) {
+            pendentesDoc.delete(soDigitos(msg.from))
+            await msg.reply('Ok, não salvei. 👍')
+            return
+          }
+        }
+      }
+
       // Comando por VOZ: se mandou áudio, transcreve antes.
       if (!comando && msg.hasMedia && mapTipoMidia(msg.type) === 'audio') {
         comando = await transcreverAudio(msg)
