@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.7.0'
+const VERSION = '1.8.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -305,6 +305,26 @@ async function acharMidiaDoc(msg) {
     }
   } catch {}
   return null
+}
+
+/** Procura o documento/imagem MAIS RECENTE da conversa (quando o usuário não citou). */
+async function acharDocRecente(chat) {
+  try {
+    const msgs = await chat.fetchMessages({ limit: 15 })
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]
+      if (m.hasMedia && (m.type === 'document' || mapTipoMidia(m.type) === 'image')) return m
+    }
+  } catch {}
+  return null
+}
+
+/** A mensagem pede pra LER um documento (e não consultar o sistema)? */
+function pedeLerDocumento(texto) {
+  const t = (texto || '').toLowerCase()
+  const mencionaSistema = /\bsistema\b|\bsalvas?\b|cadastrad|no banco|consolidad|do m[êe]s|deste m[êe]s|esse m[êe]s|esta semana/.test(t)
+  const pareceDoc = /\bnota\b|\bnf\b|\bboleto\b|\bdocumento\b|\bpdf\b|\bessa\b|\besse\b|\besta\b|\bleia\b|\bl[êe]\b|extrai|valor total|imposto/.test(t)
+  return pareceDoc && ! mencionaSistema
 }
 
 async function lerDocumento(msg, mediaMsg = msg, offerSave = true) {
@@ -762,8 +782,11 @@ client.on('message', async (msg) => {
         comando = await transcreverAudio(msg)
         if (comando) await msg.reply(`🎙️ _"${comando}"_`)
       }
-      // DOCUMENTO/IMAGEM (PDF, Nota Fiscal, boleto...) anexado OU citado: lê e extrai.
-      const docMsg = await acharMidiaDoc(msg)
+      // DOCUMENTO: anexado/citado, ou — se pediu pra ler sem citar — o mais recente da conversa.
+      let docMsg = await acharMidiaDoc(msg)
+      if (!docMsg && pedeLerDocumento(comando)) {
+        docMsg = await acharDocRecente(chat)
+      }
       if (docMsg) {
         await lerDocumento(msg, docMsg, true)
         return
@@ -783,15 +806,19 @@ client.on('message', async (msg) => {
         console.log(`   ↳ bot MARCADO no grupo | de=${fromNum} | autorizado=${ok}`)
         if (ok) {
           lembrarAdmin(msg.from)
-          // Se marcaram o bot junto com um documento (anexado ou citado), LÊ o
-          // documento em vez de mandar pra IA (que iria consultar o sistema).
-          const docMsg = await acharMidiaDoc(msg)
+          const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
+          // 1) Documento anexado ou citado -> lê ele.
+          let docMsg = await acharMidiaDoc(msg)
+          // 2) Não citou, mas pediu pra "ler a nota/documento" (sem falar em sistema)
+          //    -> pega o documento MAIS RECENTE da conversa.
+          if (!docMsg && pedeLerDocumento(pergunta)) {
+            docMsg = await acharDocRecente(chat)
+          }
           if (docMsg) {
             await lerDocumento(msg, docMsg, false)
             return
           }
-          // tira menções (@número / @bot) do texto antes de perguntar à IA
-          const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
+          // Senão, manda pra IA (que pode consultar o sistema se for o caso).
           await askAssistente(msg, pergunta || texto)
         } else {
           await msg.reply(
