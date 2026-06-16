@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.6.0'
+const VERSION = '1.7.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -295,10 +295,22 @@ async function transcreverAudio(msg) {
 // Documentos lidos aguardando o usuário confirmar se quer salvar (chat -> dados).
 const pendentesDoc = new Map()
 
-async function lerDocumento(msg) {
+/** Acha a mensagem com documento/imagem: a própria, ou a que ela respondeu (citada). */
+async function acharMidiaDoc(msg) {
+  if (msg.hasMedia && (msg.type === 'document' || mapTipoMidia(msg.type) === 'image')) return msg
+  try {
+    if (msg.hasQuotedMsg) {
+      const q = await msg.getQuotedMessage()
+      if (q?.hasMedia && (q.type === 'document' || mapTipoMidia(q.type) === 'image')) return q
+    }
+  } catch {}
+  return null
+}
+
+async function lerDocumento(msg, mediaMsg = msg, offerSave = true) {
   try {
     await msg.reply('📄 Lendo o documento e extraindo os campos...')
-    const media = await msg.downloadMedia()
+    const media = await mediaMsg.downloadMedia()
     if (!media?.data) return msg.reply('⚠️ Não consegui baixar o documento.')
     const res = await fetch(`${config.hubUrl}/api/robo/documento`, {
       method: 'POST',
@@ -313,8 +325,8 @@ async function lerDocumento(msg) {
     const data = await res.json().catch(() => ({}))
     const texto = data.texto || '⚠️ Não consegui ler o documento agora.'
 
-    // Se for nota fiscal ou boleto, NÃO salva sozinho — pergunta antes.
-    if (data.eh_nota_fiscal || data.eh_boleto) {
+    // Se for nota fiscal ou boleto, NÃO salva sozinho — pergunta antes (só no privado).
+    if (offerSave && (data.eh_nota_fiscal || data.eh_boleto)) {
       pendentesDoc.set(soDigitos(msg.from), { nf: data.nf, base64: media.data, mime: media.mimetype || '' })
       const onde = data.eh_boleto ? '*Contas a pagar*' : '*Notas*'
       return msg.reply(`${texto}\n\n💾 Quer que eu salve em ${onde} no painel? Responda *sim* ou *não*.`)
@@ -750,9 +762,10 @@ client.on('message', async (msg) => {
         comando = await transcreverAudio(msg)
         if (comando) await msg.reply(`🎙️ _"${comando}"_`)
       }
-      // DOCUMENTO/IMAGEM (PDF, Nota Fiscal, boleto...): lê e extrai os campos.
-      if (msg.hasMedia && (msg.type === 'document' || mapTipoMidia(msg.type) === 'image')) {
-        await lerDocumento(msg)
+      // DOCUMENTO/IMAGEM (PDF, Nota Fiscal, boleto...) anexado OU citado: lê e extrai.
+      const docMsg = await acharMidiaDoc(msg)
+      if (docMsg) {
+        await lerDocumento(msg, docMsg, true)
         return
       }
       await tratarComando(msg, comando)
@@ -770,6 +783,13 @@ client.on('message', async (msg) => {
         console.log(`   ↳ bot MARCADO no grupo | de=${fromNum} | autorizado=${ok}`)
         if (ok) {
           lembrarAdmin(msg.from)
+          // Se marcaram o bot junto com um documento (anexado ou citado), LÊ o
+          // documento em vez de mandar pra IA (que iria consultar o sistema).
+          const docMsg = await acharMidiaDoc(msg)
+          if (docMsg) {
+            await lerDocumento(msg, docMsg, false)
+            return
+          }
           // tira menções (@número / @bot) do texto antes de perguntar à IA
           const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
           await askAssistente(msg, pergunta || texto)
