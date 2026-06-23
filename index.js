@@ -12,7 +12,7 @@
  */
 
 import pkg from 'whatsapp-web.js'
-const { Client, LocalAuth } = pkg
+const { Client, LocalAuth, MessageMedia } = pkg
 import qrcode from 'qrcode-terminal'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.8.0'
+const VERSION = '1.9.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -263,6 +263,91 @@ async function resumirGrupo(nomeGrupo) {
     return `📋 *Resumo — ${grupo.name}*\n\n${data.resumo || 'Não consegui resumir agora.'}`
   } catch (e) {
     return `⚠️ Erro ao resumir: ${e.message}`
+  }
+}
+
+/** Extrai um intervalo de horário do texto: "das 19:20 às 19:40", "19h20 a 19h40". */
+function parsePeriodo(texto) {
+  const m = (texto || '').match(/(\d{1,2})[:h](\d{2})\s*(?:at[ée]|às|as|a|-|–)\s*(\d{1,2})[:h](\d{2})/i)
+  if (!m) return null
+  const ini = new Date(); ini.setHours(+m[1], +m[2], 0, 0)
+  const fim = new Date(); fim.setHours(+m[3], +m[4], 59, 999)
+  if (fim <= ini) return null
+  return { ini, fim, label: `${String(m[1]).padStart(2, '0')}:${m[2]} às ${String(m[3]).padStart(2, '0')}:${m[4]}` }
+}
+
+/** Gera um PDF (pdfkit) a partir do resumo em markdown simples. Retorna Buffer. */
+async function gerarPdf(titulo, subtitulo, conteudo) {
+  const PDFDocument = (await import('pdfkit')).default
+  return await new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50, size: 'A4' })
+    const chunks = []
+    doc.on('data', (c) => chunks.push(c))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+    doc.fontSize(18).fillColor('#111').text(titulo)
+    if (subtitulo) doc.moveDown(0.2).fontSize(10).fillColor('#666').text(subtitulo)
+    doc.moveDown(0.6)
+    for (const raw of String(conteudo).split(/\r?\n/)) {
+      const t = raw.trim()
+      if (!t) { doc.moveDown(0.35); continue }
+      const limpo = t.replace(/\*\*(.+?)\*\*/g, '$1')
+      if (/^#{1,6}\s+/.test(t)) {
+        doc.moveDown(0.3).fontSize(13).fillColor('#0a3d62').text(limpo.replace(/^#+\s+/, ''))
+        doc.fillColor('#000')
+      } else if (/^[-*•]\s+/.test(t)) {
+        doc.fontSize(11).fillColor('#000').text('•  ' + limpo.replace(/^[-*•]\s+/, ''), { indent: 12 })
+      } else {
+        doc.fontSize(11).fillColor('#000').text(limpo)
+      }
+    }
+    doc.end()
+  })
+}
+
+/** Resume as mensagens de um período do grupo; manda texto ou PDF. */
+async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
+  try {
+    await msg.reply(`📝 Lendo as mensagens de ${label} e resumindo...`)
+    const iniTs = Math.floor(ini.getTime() / 1000)
+    const fimTs = Math.floor(fim.getTime() / 1000)
+    const msgs = await chat.fetchMessages({ limit: 600 })
+    const linhas = []
+    for (const m of msgs) {
+      if (!m.timestamp || m.timestamp < iniTs || m.timestamp > fimTs) continue
+      let nome = m.author || m.from || ''
+      try { const c = await m.getContact(); nome = c.pushname || c.name || c.number || nome } catch {}
+      const corpo = (m.body || '').trim() || (m.hasMedia ? '[mídia]' : '')
+      if (corpo) linhas.push(`${nome}: ${corpo}`)
+    }
+    if (!linhas.length) return msg.reply(`Não achei mensagens entre ${label}.`)
+
+    let resumo = ''
+    try {
+      const res = await fetch(`${config.hubUrl}/api/robo/resumo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: config.ingestToken, grupo: chat.name, texto: linhas.join('\n'), topicos: true }),
+      })
+      const data = await res.json().catch(() => ({}))
+      resumo = (data.resumo || '').trim() || 'Não consegui resumir.'
+    } catch (e) {
+      return msg.reply('⚠️ Erro ao resumir: ' + e.message)
+    }
+
+    if (!comoPdf) {
+      return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}`)
+    }
+
+    try {
+      const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} mensagens`, resumo)
+      const media = new MessageMedia('application/pdf', buf.toString('base64'), `resumo-${label.replace(/\D/g, '')}.pdf`)
+      await client.sendMessage(msg.from, media, { caption: `📋 Resumo ${label}` })
+    } catch (e) {
+      await msg.reply(`📋 *Resumo ${label}* (não consegui gerar o PDF: ${e.message})\n\n${resumo}`)
+    }
+  } catch (e) {
+    return msg.reply('⚠️ Erro: ' + e.message)
   }
 }
 
@@ -816,6 +901,12 @@ client.on('message', async (msg) => {
           }
           if (docMsg) {
             await lerDocumento(msg, docMsg, false)
+            return
+          }
+          // Resumo por PERÍODO (ex: "resumo das 19:20 às 19:40") — manda PDF se pedir.
+          const periodo = parsePeriodo(pergunta)
+          if (periodo && /resum|t[óo]picos/i.test(pergunta)) {
+            await resumirPeriodo(msg, chat, periodo.ini, periodo.fim, /\bpdf\b|arquivo|documento/i.test(pergunta), periodo.label)
             return
           }
           // Senão, manda pra IA (que pode consultar o sistema se for o caso).
