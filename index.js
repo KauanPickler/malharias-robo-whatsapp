@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.9.0'
+const VERSION = '1.10.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -308,16 +308,33 @@ async function gerarPdf(titulo, subtitulo, conteudo) {
 /** Resume as mensagens de um período do grupo; manda texto ou PDF. */
 async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
   try {
-    await msg.reply(`📝 Lendo as mensagens de ${label} e resumindo...`)
+    await msg.reply(`📝 Lendo as mensagens de ${label} (transcrevendo os áudios, pode levar um tempinho)...`)
     const iniTs = Math.floor(ini.getTime() / 1000)
     const fimTs = Math.floor(fim.getTime() / 1000)
     const msgs = await chat.fetchMessages({ limit: 600 })
     const linhas = []
+    let audios = 0
+    let audiosLimite = false
+    const MAX_AUDIOS = 20
     for (const m of msgs) {
       if (!m.timestamp || m.timestamp < iniTs || m.timestamp > fimTs) continue
       let nome = m.author || m.from || ''
       try { const c = await m.getContact(); nome = c.pushname || c.name || c.number || nome } catch {}
-      const corpo = (m.body || '').trim() || (m.hasMedia ? '[mídia]' : '')
+      let corpo = (m.body || '').trim()
+      if (!corpo && m.hasMedia) {
+        if (mapTipoMidia(m.type) === 'audio') {
+          if (audios < MAX_AUDIOS) {
+            const t = await transcreverAudio(m) // transcreve em background (não posta no grupo)
+            corpo = t ? `[áudio] ${t}` : '[áudio sem transcrição]'
+            audios++
+          } else {
+            corpo = '[áudio não transcrito — limite atingido]'
+            audiosLimite = true
+          }
+        } else {
+          corpo = '[mídia]'
+        }
+      }
       if (corpo) linhas.push(`${nome}: ${corpo}`)
     }
     if (!linhas.length) return msg.reply(`Não achei mensagens entre ${label}.`)
@@ -335,12 +352,15 @@ async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
       return msg.reply('⚠️ Erro ao resumir: ' + e.message)
     }
 
+    const aviso = audiosLimite ? `\n\n⚠️ Tinha mais de ${MAX_AUDIOS} áudios — transcrevi os ${MAX_AUDIOS} primeiros.` : ''
+    const sub = `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} msgs · ${audios} áudio(s) transcrito(s)`
+
     if (!comoPdf) {
-      return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}`)
+      return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}${aviso}`)
     }
 
     try {
-      const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} mensagens`, resumo)
+      const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, sub, resumo + aviso)
       const media = new MessageMedia('application/pdf', buf.toString('base64'), `resumo-${label.replace(/\D/g, '')}.pdf`)
       await client.sendMessage(msg.from, media, { caption: `📋 Resumo ${label}` })
     } catch (e) {
