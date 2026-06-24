@@ -78,7 +78,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.10.0'
+const VERSION = '1.11.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 
@@ -314,8 +314,6 @@ async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
     const msgs = await chat.fetchMessages({ limit: 600 })
     const linhas = []
     let audios = 0
-    let audiosLimite = false
-    const MAX_AUDIOS = 20
     for (const m of msgs) {
       if (!m.timestamp || m.timestamp < iniTs || m.timestamp > fimTs) continue
       let nome = m.author || m.from || ''
@@ -323,14 +321,9 @@ async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
       let corpo = (m.body || '').trim()
       if (!corpo && m.hasMedia) {
         if (mapTipoMidia(m.type) === 'audio') {
-          if (audios < MAX_AUDIOS) {
-            const t = await transcreverAudio(m) // transcreve em background (não posta no grupo)
-            corpo = t ? `[áudio] ${t}` : '[áudio sem transcrição]'
-            audios++
-          } else {
-            corpo = '[áudio não transcrito — limite atingido]'
-            audiosLimite = true
-          }
+          const t = await transcreverAudio(m) // transcreve em background (não posta no grupo)
+          corpo = t ? `[áudio] ${t}` : '[áudio sem transcrição]'
+          audios++
         } else {
           corpo = '[mídia]'
         }
@@ -352,15 +345,14 @@ async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
       return msg.reply('⚠️ Erro ao resumir: ' + e.message)
     }
 
-    const aviso = audiosLimite ? `\n\n⚠️ Tinha mais de ${MAX_AUDIOS} áudios — transcrevi os ${MAX_AUDIOS} primeiros.` : ''
     const sub = `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} msgs · ${audios} áudio(s) transcrito(s)`
 
     if (!comoPdf) {
-      return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}${aviso}`)
+      return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}`)
     }
 
     try {
-      const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, sub, resumo + aviso)
+      const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, sub, resumo)
       const media = new MessageMedia('application/pdf', buf.toString('base64'), `resumo-${label.replace(/\D/g, '')}.pdf`)
       await client.sendMessage(msg.from, media, { caption: `📋 Resumo ${label}` })
     } catch (e) {
@@ -512,6 +504,23 @@ async function tratarComando(msg, textoOverride = null) {
 
   // "resumo do grupo X" / "/resumo X" / "resumir grupo X"
   const idx = lower.indexOf('grupo')
+
+  // Resumo de um PERÍODO de um grupo específico, pedido no PRIVADO:
+  // "resumo do grupo Operação JM das 19:20 às 19:40 em pdf"
+  const periodoPriv = parsePeriodo(texto)
+  if (periodoPriv && idx >= 0) {
+    let nomeG = texto.slice(idx + 5)
+      .replace(/\s+(d[aeo]s?|às|as|a|at[ée]|entre)\s+\d.*$/i, '') // tira " das 19:20..."
+      .replace(/\s+\d{1,2}[:h]\d{2}.*$/, '') // fallback: tira a partir do horário
+      .trim()
+    if (!nomeG) return msg.reply('Qual grupo? Ex: *resumo do grupo Operação JM das 19:20 às 19:40 em pdf*')
+    const chats = await client.getChats()
+    const grupo = chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(nomeG.toLowerCase()))
+    if (!grupo) return msg.reply(`❌ Não achei o grupo "${nomeG}". Mande *grupos* pra ver a lista.`)
+    await resumirPeriodo(msg, grupo, periodoPriv.ini, periodoPriv.fim, /\bpdf\b|arquivo|documento/i.test(lower), periodoPriv.label)
+    return
+  }
+
   let nome = null
   if (idx >= 0) nome = texto.slice(idx + 5).trim()
   else if (lower.startsWith('/resumo')) nome = texto.slice(7).trim()
