@@ -29,4 +29,51 @@ export default {
   transcreverVideo: false,
   transcreverImagem: false,
   maxMidiaMb: 16,
+
+  // Monitor de sites. O robô checa fora da HostGator e avisa no WhatsApp.
+  // Estados:
+  // - OK: respondeu até slowMs
+  // - LENTO: respondeu acima de slowMs por slowAfter vezes
+  // - FORA: timeout/erro HTTP 5xx por failAfter vezes
+  monitorSites: [
+    {
+      key: 'malharia-hub',
+      nome: 'Malharias Hub',
+      url: 'https://malharia-hub.a3pprog.com.br',
+      checkEveryMs: 60_000,
+      timeoutMs: 10_000,
+      slowMs: 3_000,
+      failAfter: 2,
+      slowAfter: 3,
+      recoverAfter: 2,
+      alertEveryMs: 10 * 60_000,
+      screenshot: true,
+    },
+    {
+      key: 'pires-dashboard',
+      nome: 'Pires Dashboard',
+      url: 'https://pires-dashboard.a3pprog.com.br',
+      checkEveryMs: 60_000,
+      timeoutMs: 10_000,
+      slowMs: 3_000,
+      failAfter: 2,
+      slowAfter: 3,
+      recoverAfter: 2,
+      alertEveryMs: 10 * 60_000,
+      screenshot: true,
+    },
+    {
+      key: 'projeto-demonstracao',
+      nome: 'Projeto Demonstração',
+      url: 'https://projeto-demonstracao.a3pprog.com.br',
+      checkEveryMs: 60_000,
+      timeoutMs: 10_000,
+      slowMs: 3_000,
+      failAfter: 2,
+      slowAfter: 3,
+      recoverAfter: 2,
+      alertEveryMs: 10 * 60_000,
+      screenshot: true,
+    },
+  ],
 }

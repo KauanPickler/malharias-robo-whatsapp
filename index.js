@@ -78,9 +78,38 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.11.0'
+const VERSION = '1.12.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
+let monitorLoopStarted = false
+
+const DEFAULT_MONITOR_SITES = [
+  {
+    key: 'malharia-hub',
+    nome: 'Malharias Hub',
+    url: 'https://malharia-hub.a3pprog.com.br',
+  },
+  {
+    key: 'malharia-brusque',
+    nome: 'Malharia Brusque',
+    url: 'https://malharia-brusque.a3pprog.com.br',
+  },
+  {
+    key: 'pires-dashboard',
+    nome: 'Pires Dashboard',
+    url: 'https://pires-dashboard.a3pprog.com.br',
+  },
+  {
+    key: 'tecelagem-jm',
+    nome: 'Tecelagem JM',
+    url: 'https://tecelagem-jm.a3pprog.com.br',
+  },
+  {
+    key: 'projeto-demonstracao',
+    nome: 'Projeto Demonstração',
+    url: 'https://projeto-demonstracao.a3pprog.com.br',
+  },
+]
 
 /** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
 async function heartbeatLoop() {
@@ -150,6 +179,8 @@ async function carregarConfigRemota() {
 
 /** Config efetiva: o hub manda; o config.js é fallback. */
 function cfg() {
+  const monitorSites = remote.monitor_sites ?? config.monitorSites ?? DEFAULT_MONITOR_SITES
+
   return {
     apenasGrupos: remote.apenas_grupos ?? config.apenasGrupos ?? true,
     transcreverAudio: remote.transcrever_audio ?? config.transcreverAudio ?? true,
@@ -161,6 +192,7 @@ function cfg() {
     controleNumeros: remote.controle_numeros ?? config.controleNumeros ?? [],
     notificarDemandas: remote.notificar_demandas ?? config.notificarDemandas ?? true,
     somenteMapeados: remote.somente_mapeados ?? config.somenteMapeados ?? false,
+    monitorSites,
   }
 }
 
@@ -480,6 +512,8 @@ async function tratarComando(msg, textoOverride = null) {
       '🤖 *Posso te ajudar com:*\n' +
         '• *resumo do grupo NOME* — resumo das mensagens do grupo\n' +
         '• *grupos* — lista os grupos disponíveis\n' +
+        '• *status sites* — mostra o monitor de sites\n' +
+        '• *parar alertas* — silencia alertas de sites por 40 min\n' +
         '• *versão* — mostra a versão do robô\n' +
         '• *reset* — limpa a conversa se eu travar\n\n' +
         'E qualquer coisa do sistema, é só pedir. Ex:\n' +
@@ -489,6 +523,20 @@ async function tratarComando(msg, textoOverride = null) {
         '• "como tá a fábrica?"\n' +
         '• "faz o deploy da JM"',
     )
+  }
+
+  if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(lower)) {
+    return msg.reply(statusMonitorTexto())
+  }
+
+  if (ehPedidoSilenciarAlertas(lower)) {
+    const ate = silenciarAlertasMonitor(40)
+    return msg.reply(`🔕 Alertas de sites silenciados por 40 minutos, até ${ate}.`)
+  }
+
+  if (ehPedidoReativarAlertas(lower)) {
+    monitorSilenciadoAte = 0
+    return msg.reply('🔔 Alertas de sites reativados.')
   }
 
   if (lower === 'grupos' || lower === '/grupos') {
@@ -597,6 +645,212 @@ async function enviarNoGrupo(nome, texto) {
   } catch (e) {
     console.warn('⚠️ Falha ao enviar no grupo:', e.message)
   }
+}
+
+// Monitoramento leve de sites. Roda fora da HostGator, mede tempo de resposta e
+// avisa admins no WhatsApp quando um site fica lento/fora. Não usa IA.
+const monitorState = new Map()
+let monitorSilenciadoAte = 0
+
+function normalizarSiteMonitor(site) {
+  if (!site || site.enabled === false) return null
+  const url = String(site.url || '').trim()
+  if (!/^https?:\/\//i.test(url)) return null
+
+  return {
+    key: String(site.key || site.nome || site.name || url).trim(),
+    nome: String(site.nome || site.name || site.key || url).trim(),
+    url,
+    timeoutMs: Number(site.timeoutMs || site.timeout_ms || 10000),
+    slowMs: Number(site.slowMs || site.slow_ms || 3000),
+    checkEveryMs: Number(site.checkEveryMs || site.check_every_ms || 60000),
+    alertEveryMs: Number(site.alertEveryMs || site.alert_every_ms || 10 * 60 * 1000),
+    failAfter: Number(site.failAfter || site.fail_after || 2),
+    slowAfter: Number(site.slowAfter || site.slow_after || 3),
+    recoverAfter: Number(site.recoverAfter || site.recover_after || 2),
+    screenshot: site.screenshot !== false,
+  }
+}
+
+function ehPedidoSilenciarAlertas(texto) {
+  return /^(parar alertas|para de alertar|pausar alertas|silenciar alertas|\/mute-sites)\b/i.test(String(texto || '').trim())
+}
+
+function ehPedidoReativarAlertas(texto) {
+  return /^(voltar alertas|reativar alertas|ativar alertas|\/unmute-sites)\b/i.test(String(texto || '').trim())
+}
+
+async function medirSite(site) {
+  const ini = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), site.timeoutMs)
+  try {
+    const res = await fetch(site.url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'User-Agent': `MalhariasBot-Monitor/${VERSION}` },
+    })
+    const ms = Date.now() - ini
+    if (!res.ok || [500, 502, 503, 504].includes(res.status)) {
+      return { status: 'down', ms, detail: `HTTP ${res.status}` }
+    }
+    if (ms > site.slowMs) {
+      return { status: 'slow', ms, detail: `respondeu em ${ms}ms` }
+    }
+    return { status: 'ok', ms, detail: `HTTP ${res.status} em ${ms}ms` }
+  } catch (e) {
+    const ms = Date.now() - ini
+    const detail = e.name === 'AbortError' ? `timeout ${site.timeoutMs}ms` : e.message
+    return { status: 'down', ms, detail }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function screenshotSite(site) {
+  if (!site.screenshot || !client.pupBrowser) return null
+  let page = null
+  try {
+    page = await client.pupBrowser.newPage()
+    await page.setViewport({ width: 1366, height: 768, deviceScaleFactor: 1 })
+    await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: site.timeoutMs })
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const base64 = await page.screenshot({ type: 'jpeg', quality: 70, encoding: 'base64', fullPage: false })
+    return new MessageMedia('image/jpeg', base64, `${site.key}.jpg`)
+  } catch (e) {
+    console.warn(`⚠️ Falha ao capturar print de ${site.url}:`, e.message)
+    return null
+  } finally {
+    if (page) {
+      try { await page.close() } catch {}
+    }
+  }
+}
+
+function destinosAdmins() {
+  const admins = (cfg().controleNumeros || []).map(soDigitos).filter(Boolean)
+  return adminChats.size ? [...adminChats] : admins.map((n) => `${n}@c.us`)
+}
+
+async function avisarAdminsMonitor(texto, media = null) {
+  const destinos = destinosAdmins()
+  if (!destinos.length) {
+    console.warn('⚠️ Monitor detectou problema, mas não há admin conhecido/configurado para avisar.')
+    return
+  }
+  for (const dest of destinos) {
+    try {
+      if (media) await client.sendMessage(dest, media, { caption: texto })
+      else await client.sendMessage(dest, texto)
+    } catch (e) {
+      console.warn('⚠️ Falha ao avisar admin do monitor:', e.message)
+    }
+  }
+}
+
+async function checarSiteMonitor(site) {
+  const now = Date.now()
+  const st = monitorState.get(site.key) || {
+    lastCheckAt: 0,
+    failCount: 0,
+    slowCount: 0,
+    okCount: 0,
+    state: 'unknown',
+    lastAlertAt: 0,
+    downSince: null,
+  }
+
+  if (now - st.lastCheckAt < site.checkEveryMs) return
+  st.lastCheckAt = now
+
+  const r = await medirSite(site)
+  st.lastResult = r
+
+  if (r.status === 'ok') {
+    st.okCount += 1
+    st.failCount = 0
+    st.slowCount = 0
+    if (['down', 'slow'].includes(st.state) && st.okCount >= site.recoverAfter) {
+      const duracaoMin = st.downSince ? Math.round((now - st.downSince) / 60000) : 0
+      st.state = 'ok'
+      st.downSince = null
+      st.lastAlertAt = now
+      await avisarAdminsMonitor(
+        `✅ *Site normalizou*\n${site.nome}\n${site.url}\nResposta: ${r.detail}${duracaoMin ? `\nTempo afetado: ~${duracaoMin} min` : ''}`,
+      )
+    } else if (st.state === 'unknown') {
+      st.state = 'ok'
+    }
+    monitorState.set(site.key, st)
+    return
+  }
+
+  st.okCount = 0
+  if (r.status === 'down') {
+    st.failCount += 1
+    st.slowCount += 1
+  } else {
+    st.slowCount += 1
+    st.failCount = 0
+  }
+
+  const novoEstado = st.failCount >= site.failAfter ? 'down' : (st.slowCount >= site.slowAfter ? 'slow' : st.state)
+  if (!st.downSince && ['down', 'slow'].includes(novoEstado)) st.downSince = now
+
+  const podeAlertar = now >= monitorSilenciadoAte && (now - st.lastAlertAt >= site.alertEveryMs || st.state !== novoEstado)
+  st.state = novoEstado
+
+  if (['down', 'slow'].includes(novoEstado) && podeAlertar) {
+    st.lastAlertAt = now
+    const titulo = novoEstado === 'down' ? '🚨 *Site fora do ar*' : '⚠️ *Site lento*'
+    const texto =
+      `${titulo}\n` +
+      `${site.nome}\n` +
+      `${site.url}\n` +
+      `Status: ${r.detail}\n` +
+      `Falhas seguidas: ${st.failCount}\n` +
+      `Lentidões seguidas: ${st.slowCount}\n` +
+      `Avisarei novamente a cada ${Math.round(site.alertEveryMs / 60000)} min enquanto continuar assim.\n\n` +
+      `Para silenciar: *parar alertas*`
+    const media = await screenshotSite(site)
+    await avisarAdminsMonitor(texto, media)
+  }
+
+  monitorState.set(site.key, st)
+}
+
+async function monitorSitesLoop() {
+  try {
+    if (!whatsappReady) return
+    const sites = (cfg().monitorSites || []).map(normalizarSiteMonitor).filter(Boolean)
+    for (const site of sites) {
+      await checarSiteMonitor(site)
+    }
+  } catch (e) {
+    console.warn('⚠️ Erro no monitor de sites:', e.message)
+  } finally {
+    setTimeout(monitorSitesLoop, 15000)
+  }
+}
+
+function silenciarAlertasMonitor(minutos = 40) {
+  monitorSilenciadoAte = Date.now() + minutos * 60 * 1000
+  return new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+}
+
+function statusMonitorTexto() {
+  const sites = (cfg().monitorSites || []).map(normalizarSiteMonitor).filter(Boolean)
+  if (!sites.length) return 'Nenhum site configurado no monitor.'
+  const linhas = sites.map((site) => {
+    const st = monitorState.get(site.key)
+    const r = st?.lastResult
+    return `• *${site.nome}*: ${st?.state || 'sem leitura'}${r ? ` — ${r.detail}` : ''}`
+  })
+  if (Date.now() < monitorSilenciadoAte) {
+    linhas.push('', `Alertas silenciados até ${new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.`)
+  }
+  return linhas.join('\n')
 }
 
 /**
@@ -816,6 +1070,10 @@ client.on('ready', () => {
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
   notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
   avisosLoop() // alertas/resumo/lembretes/resolvido-no-grupo
+  if (!monitorLoopStarted) {
+    monitorLoopStarted = true
+    monitorSitesLoop() // monitora sites e avisa admins se ficarem lentos/fora
+  }
   reportarGrupos() // manda a lista de grupos pro painel
   setInterval(reportarGrupos, 5 * 60 * 1000) // atualiza a cada 5 min
 })
@@ -913,6 +1171,22 @@ client.on('message', async (msg) => {
     // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
+
+      if (numeroAutorizado(fromNum) && ehPedidoSilenciarAlertas(texto)) {
+        const ate = silenciarAlertasMonitor(40)
+        await msg.reply(`🔕 Alertas de sites silenciados por 40 minutos, até ${ate}.`)
+        return
+      }
+      if (numeroAutorizado(fromNum) && ehPedidoReativarAlertas(texto)) {
+        monitorSilenciadoAte = 0
+        await msg.reply('🔔 Alertas de sites reativados.')
+        return
+      }
+      if (numeroAutorizado(fromNum) && /^(status sites|\/status-sites|\/sites|sites)$/i.test(texto)) {
+        await msg.reply(statusMonitorTexto())
+        return
+      }
+
       const mencionou = await botFoiMencionado(msg, texto)
 
       if (mencionou) {
@@ -921,6 +1195,20 @@ client.on('message', async (msg) => {
         if (ok) {
           lembrarAdmin(msg.from)
           const pergunta = texto.replace(/@\d+/g, '').replace(/@?bot\b/i, '').trim()
+          if (ehPedidoSilenciarAlertas(pergunta)) {
+            const ate = silenciarAlertasMonitor(40)
+            await msg.reply(`🔕 Alertas de sites silenciados por 40 minutos, até ${ate}.`)
+            return
+          }
+          if (ehPedidoReativarAlertas(pergunta)) {
+            monitorSilenciadoAte = 0
+            await msg.reply('🔔 Alertas de sites reativados.')
+            return
+          }
+          if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(pergunta)) {
+            await msg.reply(statusMonitorTexto())
+            return
+          }
           // 1) Documento anexado ou citado -> lê ele.
           let docMsg = await acharMidiaDoc(msg)
           // 2) Não citou, mas pediu pra "ler a nota/documento" (sem falar em sistema)
