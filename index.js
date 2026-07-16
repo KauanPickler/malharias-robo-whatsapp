@@ -80,7 +80,7 @@ const bootTime = new Date().toISOString()
 const VERSION = '2.2.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
-let monitorLoopStarted = false
+let loopsStarted = false
 
 const DEFAULT_MONITOR_SITES = [
   {
@@ -1227,14 +1227,20 @@ client.on('ready', () => {
   idsBot.forEach(lembrarBotId)
   console.log('ℹ️ ids do bot:', JSON.stringify(idsBot), '| botIds=', JSON.stringify([...botIds]))
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
-  notificarDemandasLoop() // começa a avisar o admin sobre novas demandas
-  avisosLoop() // alertas/resumo/lembretes/resolvido-no-grupo
-  if (!monitorLoopStarted) {
-    monitorLoopStarted = true
-    monitorSitesLoop() // monitora sites e avisa admins se ficarem lentos/fora
+
+  // Com o Baileys, 'ready' dispara a CADA reconexão. Os loops (heartbeat de
+  // avisos/demandas/monitor + interval de reportar grupos) só podem iniciar UMA
+  // vez — senão acumulam timers duplicados a cada reconexão.
+  if (!loopsStarted) {
+    loopsStarted = true
+    notificarDemandasLoop() // avisa o admin sobre novas demandas
+    avisosLoop() // alertas/resumo/lembretes/resolvido-no-grupo
+    monitorSitesLoop() // monitora sites + máquinas offline
+    setInterval(reportarGrupos, 5 * 60 * 1000) // atualiza a lista de grupos a cada 5 min
   }
-  reportarGrupos() // manda a lista de grupos pro painel
-  setInterval(reportarGrupos, 5 * 60 * 1000) // atualiza a cada 5 min
+  // Reporta os grupos a cada 'ready' (com um respiro p/ evitar rate-overlimit
+  // do groupFetch logo após reconectar).
+  setTimeout(reportarGrupos, 8000)
 })
 client.on('disconnected', (r) => {
   whatsappReady = false
