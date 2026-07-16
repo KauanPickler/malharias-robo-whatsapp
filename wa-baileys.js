@@ -18,7 +18,7 @@ import makeWASocket, {
   Browsers,
 } from 'baileys'
 import { EventEmitter } from 'events'
-import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
 
 // Logger no-op (Baileys exige interface pino; não queremos poluir o log).
 const silentLogger = {
@@ -118,6 +118,47 @@ export function createClient(opts = {}) {
   let pairRequested = false
   const msgStore = new Map() // jid -> array de mensagens cruas (para fetchMessages)
   const groupCache = new Map() // jid -> subject (nome do grupo)
+
+  // Cache de grupos PERSISTENTE. O groupFetchAllParticipating() do WhatsApp é
+  // pesado e leva rate-overlimit se chamado demais — então cacheamos em disco,
+  // atualizamos no máximo a cada 5 min, e aprendemos o nome quando chega msg.
+  const GRUPOS_FILE = opts.gruposFile || './grupos-cache.json'
+  try {
+    if (existsSync(GRUPOS_FILE)) {
+      for (const [j, s] of Object.entries(JSON.parse(readFileSync(GRUPOS_FILE, 'utf8')) || {})) groupCache.set(j, s)
+    }
+  } catch {}
+  function salvarGrupos() {
+    try { writeFileSync(GRUPOS_FILE, JSON.stringify(Object.fromEntries(groupCache))) } catch {}
+  }
+  let ultimoFetchGrupos = 0
+  let fetchGruposEmAndamento = false
+  async function garantirGrupos(forcar = false) {
+    if (!sock) return
+    const agora = Date.now()
+    if (!forcar && agora - ultimoFetchGrupos < 5 * 60 * 1000) return
+    if (fetchGruposEmAndamento) return
+    fetchGruposEmAndamento = true
+    try {
+      const g = await sock.groupFetchAllParticipating()
+      if (g && Object.keys(g).length) {
+        for (const [j, m] of Object.entries(g)) groupCache.set(j, m.subject || '')
+        salvarGrupos()
+        ultimoFetchGrupos = agora
+      }
+    } catch {
+      // rate-overlimit/etc — mantém o cache e tenta mais tarde
+    } finally {
+      fetchGruposEmAndamento = false
+    }
+  }
+  // Aprende o nome de UM grupo (chamada leve) quando chega mensagem dele.
+  function aprenderGrupo(jid) {
+    if (!jid || !String(jid).endsWith('@g.us') || groupCache.has(jid) || !sock) return
+    sock.groupMetadata(jid).then((m) => {
+      if (m?.subject) { groupCache.set(jid, m.subject); salvarGrupos() }
+    }).catch(() => {})
+  }
 
   // Histórico persistente em disco (JSONL por dia) — permite resumo do dia
   // inteiro mesmo após reinício. Cada linha: {jid, raw}.
@@ -260,18 +301,13 @@ export function createClient(opts = {}) {
   client.pupBrowser = null // Baileys não tem navegador (screenshots desativados)
 
   client.getChats = async function () {
-    try {
-      const grupos = await sock.groupFetchAllParticipating()
-      const chats = []
-      for (const [jid, meta] of Object.entries(grupos || {})) {
-        groupCache.set(jid, meta.subject || '')
-        chats.push(fazerChat(jid))
-      }
-      return chats
-    } catch (e) {
-      console.warn('⚠️ getChats (baileys) falhou:', e.message)
-      return []
-    }
+    // Sem cache ainda: força UMA busca. Com cache: usa o que tem e atualiza
+    // em segundo plano (não bloqueia nem estoura rate-limit).
+    if (!groupCache.size) await garantirGrupos(true)
+    else garantirGrupos().catch(() => {})
+    return [...groupCache.entries()]
+      .filter(([j]) => String(j).endsWith('@g.us'))
+      .map(([j]) => fazerChat(j))
   }
 
   client.sendMessage = async function (dest, content, o = {}) {
@@ -375,6 +411,9 @@ export function createClient(opts = {}) {
         }
         client.emit('authenticated')
         client.emit('ready')
+        // Atualiza o cache de grupos uma vez, com folga (evita rate-overlimit
+        // logo após conectar). Se falhar, tenta de novo no próximo getChats.
+        setTimeout(() => garantirGrupos(true).catch(() => {}), 12000)
       }
 
       if (connection === 'close') {
@@ -395,6 +434,7 @@ export function createClient(opts = {}) {
         const jid = raw.key?.remoteJid
         if (!jid || jid === 'status@broadcast') continue
         guardar(jid, raw)
+        aprenderGrupo(jid) // aprende o nome do grupo se ainda não conhece
         // Só emite mensagens NOVAS e que não são do próprio bot.
         if (type !== 'notify' || raw.key?.fromMe) continue
         try { client.emit('message', fazerMsg(raw)) } catch (e) { console.error('Erro ao montar msg:', e.message) }
@@ -402,14 +442,16 @@ export function createClient(opts = {}) {
     })
 
     // Mantém o cache de nomes de grupo atualizado.
-    sock.ev.on('groups.update', async () => {
-      try {
-        const g = await sock.groupFetchAllParticipating()
-        for (const [j, m] of Object.entries(g || {})) groupCache.set(j, m.subject || '')
-      } catch {}
+    sock.ev.on('groups.update', (gs) => {
+      let mudou = false
+      for (const g of gs || []) {
+        if (g?.id && g.subject) { groupCache.set(g.id, g.subject); mudou = true }
+      }
+      if (mudou) salvarGrupos()
     })
     sock.ev.on('groups.upsert', (gs) => {
-      for (const g of gs || []) groupCache.set(g.id, g.subject || '')
+      for (const g of gs || []) if (g?.id) groupCache.set(g.id, g.subject || '')
+      salvarGrupos()
     })
   }
 
