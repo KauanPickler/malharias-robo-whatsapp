@@ -77,7 +77,10 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.2.1'
+const VERSION = '2.3.0'
+
+// Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
+const RESUMO_DIA_DESTINO = '5547999194341'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let loopsStarted = false
@@ -307,6 +310,22 @@ function parsePeriodo(texto) {
   return { ini, fim, label: `${String(m[1]).padStart(2, '0')}:${m[2]} às ${String(m[3]).padStart(2, '0')}:${m[4]}` }
 }
 
+/** Detecta pedido de resumo de um DIA inteiro: "hoje", "de hoje", "ontem". */
+function parseDia(texto) {
+  const t = (texto || '').toLowerCase()
+  if (/\bontem\b/.test(t)) {
+    const ini = new Date(); ini.setDate(ini.getDate() - 1); ini.setHours(0, 0, 0, 0)
+    const fim = new Date(ini); fim.setHours(23, 59, 59, 999)
+    return { ini, fim, label: `ontem ${ini.toLocaleDateString('pt-BR')}` }
+  }
+  if (/\bhoje\b|dia de hoje|\bdo dia\b|de hoje/.test(t)) {
+    const ini = new Date(); ini.setHours(0, 0, 0, 0)
+    const fim = new Date() // até agora
+    return { ini, fim, label: `hoje ${ini.toLocaleDateString('pt-BR')}` }
+  }
+  return null
+}
+
 /** Gera um PDF (pdfkit) a partir do resumo em markdown simples. Retorna Buffer. */
 async function gerarPdf(titulo, subtitulo, conteudo) {
   const PDFDocument = (await import('pdfkit')).default
@@ -337,31 +356,41 @@ async function gerarPdf(titulo, subtitulo, conteudo) {
 }
 
 /** Resume as mensagens de um período do grupo; manda texto ou PDF. */
-async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
+async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label, destino = null) {
   try {
-    await msg.reply(`📝 Lendo as mensagens de ${label} (transcrevendo os áudios, pode levar um tempinho)...`)
+    await msg.reply(`📝 Lendo as mensagens de ${label} (transcrevendo áudios e lendo imagens, pode levar um tempinho)...`)
     const iniTs = Math.floor(ini.getTime() / 1000)
     const fimTs = Math.floor(fim.getTime() / 1000)
-    const msgs = await chat.fetchMessages({ limit: 600 })
+    // Lê do histórico persistido (disco + memória) — cobre o dia todo mesmo
+    // que o bot tenha reiniciado no meio.
+    const msgs = await client.mensagensDoPeriodo(chat.id._serialized, iniTs, fimTs)
     const linhas = []
     let audios = 0
+    let imagens = 0
     for (const m of msgs) {
-      if (!m.timestamp || m.timestamp < iniTs || m.timestamp > fimTs) continue
       let nome = m.author || m.from || ''
       try { const c = await m.getContact(); nome = c.pushname || c.name || c.number || nome } catch {}
       let corpo = (m.body || '').trim()
-      if (!corpo && m.hasMedia) {
-        if (mapTipoMidia(m.type) === 'audio') {
-          const t = await transcreverAudio(m) // transcreve em background (não posta no grupo)
-          corpo = t ? `[áudio] ${t}` : '[áudio sem transcrição]'
+      const tipo = mapTipoMidia(m.type)
+      if (m.hasMedia && (tipo === 'audio' || tipo === 'image' || tipo === 'video')) {
+        if (tipo === 'audio') {
+          const t = await transcreverMidia(m, 'audio')
+          corpo = `${corpo ? corpo + ' ' : ''}[áudio] ${t || 'sem transcrição'}`.trim()
           audios++
-        } else {
-          corpo = '[mídia]'
+        } else if (tipo === 'image') {
+          const t = await transcreverMidia(m, 'image')
+          corpo = `${corpo ? corpo + ' ' : ''}[imagem] ${t || 'sem descrição'}`.trim()
+          imagens++
+        } else if (tipo === 'video') {
+          const t = await transcreverMidia(m, 'video')
+          corpo = `${corpo ? corpo + ' ' : ''}[vídeo] ${t || 'sem descrição'}`.trim()
         }
+      } else if (!corpo && m.hasMedia) {
+        corpo = '[documento/mídia]'
       }
       if (corpo) linhas.push(`${nome}: ${corpo}`)
     }
-    if (!linhas.length) return msg.reply(`Não achei mensagens entre ${label}.`)
+    if (!linhas.length) return msg.reply(`Não achei mensagens em ${label}.`)
 
     let resumo = ''
     try {
@@ -376,18 +405,26 @@ async function resumirPeriodo(msg, chat, ini, fim, comoPdf, label) {
       return msg.reply('⚠️ Erro ao resumir: ' + e.message)
     }
 
-    const sub = `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} msgs · ${audios} áudio(s) transcrito(s)`
+    const sub = `Período: ${label} · ${new Date().toLocaleDateString('pt-BR')} · ${linhas.length} msgs · ${audios} áudio(s) · ${imagens} imagem(ns)`
+    const alvo = destino || msg.from
 
     if (!comoPdf) {
+      if (alvo !== msg.from) {
+        await client.sendMessage(alvo, `📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}`)
+        return msg.reply('✅ Te enviei o resumo no privado.')
+      }
       return msg.reply(`📋 *Resumo ${label}* — ${chat.name || ''}\n\n${resumo}`)
     }
 
     try {
       const buf = await gerarPdf(`Resumo — ${chat.name || 'Grupo'}`, sub, resumo)
-      const media = new MessageMedia('application/pdf', buf.toString('base64'), `resumo-${label.replace(/\D/g, '')}.pdf`)
-      await client.sendMessage(msg.from, media, { caption: `📋 Resumo ${label}` })
+      const media = new MessageMedia('application/pdf', buf.toString('base64'), `resumo-${label.replace(/[^\dA-Za-z]/g, '') || 'grupo'}.pdf`)
+      await client.sendMessage(alvo, media, { caption: `📋 Resumo ${label} — ${chat.name || ''}` })
+      if (alvo !== msg.from) await msg.reply('✅ Gerei o PDF e te enviei no privado.')
     } catch (e) {
-      await msg.reply(`📋 *Resumo ${label}* (não consegui gerar o PDF: ${e.message})\n\n${resumo}`)
+      const txt = `📋 *Resumo ${label}* (não consegui gerar o PDF: ${e.message})\n\n${resumo}`
+      if (alvo !== msg.from) await client.sendMessage(alvo, txt)
+      else await msg.reply(txt)
     }
   } catch (e) {
     return msg.reply('⚠️ Erro: ' + e.message)
@@ -401,22 +438,27 @@ async function listarGrupos() {
   return grupos.length ? `*Grupos disponíveis:*\n${grupos.slice(0, 60).join('\n')}` : 'Nenhum grupo encontrado.'
 }
 
-/** Transcreve um áudio recebido (comando por voz) usando o hub. */
-async function transcreverAudio(msg) {
+/** Transcreve/descreve uma mídia (áudio, imagem, vídeo) usando o hub (Gemini). */
+async function transcreverMidia(msg, tipo = 'audio') {
   try {
     const media = await msg.downloadMedia()
     if (!media?.data) return ''
     const res = await fetch(`${config.hubUrl}/api/robo/transcrever`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: config.ingestToken, media_base64: media.data, media_mime: media.mimetype || '', media_type: 'audio' }),
+      body: JSON.stringify({ token: config.ingestToken, media_base64: media.data, media_mime: media.mimetype || '', media_type: tipo }),
     })
     const data = await res.json().catch(() => ({}))
     return (data.texto || '').trim()
   } catch (e) {
-    console.warn('⚠️ Falha ao transcrever áudio:', e.message)
+    console.warn(`⚠️ Falha ao transcrever ${tipo}:`, e.message)
     return ''
   }
+}
+
+/** Compat: transcrição de áudio (comando por voz). */
+async function transcreverAudio(msg) {
+  return transcreverMidia(msg, 'audio')
 }
 
 /** Lê um documento/imagem (PDF, Nota Fiscal, boleto...) e extrai os campos via IA. */
@@ -551,6 +593,25 @@ async function tratarComando(msg, textoOverride = null) {
 
   // "resumo do grupo X" / "/resumo X" / "resumir grupo X"
   const idx = lower.indexOf('grupo')
+
+  // Resumo do DIA inteiro de um grupo, pedido no PRIVADO:
+  // "resuma o grupo Operação JM hoje" / "resumo do grupo JM de hoje"
+  const diaPriv = parseDia(texto)
+  if (diaPriv && idx >= 0) {
+    let nomeG = texto.slice(idx + 5)
+      .replace(/\b(de\s+)?hoje\b.*/i, '')
+      .replace(/\bdia de hoje\b.*/i, '')
+      .replace(/\bdo dia\b.*/i, '')
+      .replace(/\bontem\b.*/i, '')
+      .replace(/\bem pdf\b.*/i, '')
+      .trim()
+    if (!nomeG) return msg.reply('Qual grupo? Ex: *resuma o grupo Operação JM hoje*')
+    const chats = await client.getChats()
+    const grupo = chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(nomeG.toLowerCase()))
+    if (!grupo) return msg.reply(`❌ Não achei o grupo "${nomeG}". Mande *grupos* pra ver a lista.`)
+    await resumirPeriodo(msg, grupo, diaPriv.ini, diaPriv.fim, true, diaPriv.label, `${RESUMO_DIA_DESTINO}@c.us`)
+    return
+  }
 
   // Resumo de um PERÍODO de um grupo específico, pedido no PRIVADO:
   // "resumo do grupo Operação JM das 19:20 às 19:40 em pdf"
@@ -1386,6 +1447,13 @@ client.on('message', async (msg) => {
           }
           if (docMsg) {
             await lerDocumento(msg, docMsg, false)
+            return
+          }
+          // Resumo do DIA inteiro ("resuma o grupo hoje / de hoje / ontem") —
+          // gera PDF (texto+áudio+imagem) e envia no PRIVADO configurado.
+          const dia = parseDia(pergunta)
+          if (dia && /resum|t[óo]picos/i.test(pergunta)) {
+            await resumirPeriodo(msg, chat, dia.ini, dia.fim, true, dia.label, `${RESUMO_DIA_DESTINO}@c.us`)
             return
           }
           // Resumo por PERÍODO (ex: "resumo das 19:20 às 19:40") — manda PDF se pedir.

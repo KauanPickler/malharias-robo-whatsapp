@@ -18,6 +18,7 @@ import makeWASocket, {
   Browsers,
 } from 'baileys'
 import { EventEmitter } from 'events'
+import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, unlinkSync } from 'fs'
 
 // Logger no-op (Baileys exige interface pino; não queremos poluir o log).
 const silentLogger = {
@@ -118,12 +119,42 @@ export function createClient(opts = {}) {
   const msgStore = new Map() // jid -> array de mensagens cruas (para fetchMessages)
   const groupCache = new Map() // jid -> subject (nome do grupo)
 
+  // Histórico persistente em disco (JSONL por dia) — permite resumo do dia
+  // inteiro mesmo após reinício. Cada linha: {jid, raw}.
+  const HIST_DIR = opts.histDir || './historico'
+  const HIST_DIAS = Number(opts.histDias || 8) // mantém ~8 dias
+  try { if (!existsSync(HIST_DIR)) mkdirSync(HIST_DIR, { recursive: true }) } catch {}
+
+  function dataLocal(tsSec) {
+    const d = new Date((Number(tsSec) || Math.floor(Date.now() / 1000)) * 1000)
+    return d.toLocaleDateString('en-CA') // YYYY-MM-DD no fuso do processo
+  }
+
+  function persistir(jid, raw) {
+    try {
+      const dia = dataLocal(raw.messageTimestamp)
+      appendFileSync(`${HIST_DIR}/${dia}.jsonl`, JSON.stringify({ jid, raw }) + '\n')
+    } catch {}
+  }
+
+  function limparHistoricoAntigo() {
+    try {
+      const arquivos = readdirSync(HIST_DIR).filter((f) => f.endsWith('.jsonl')).sort()
+      while (arquivos.length > HIST_DIAS) {
+        const velho = arquivos.shift()
+        try { unlinkSync(`${HIST_DIR}/${velho}`) } catch {}
+      }
+    } catch {}
+  }
+  limparHistoricoAntigo()
+
   function guardar(jid, raw) {
     if (!jid) return
     let arr = msgStore.get(jid)
     if (!arr) { arr = []; msgStore.set(jid, arr) }
     arr.push(raw)
     if (arr.length > 800) arr.splice(0, arr.length - 800)
+    persistir(jid, raw)
   }
 
   // ---- envio (lê o sock atual; sobrevive a reconexões) ----
@@ -245,6 +276,42 @@ export function createClient(opts = {}) {
 
   client.sendMessage = async function (dest, content, o = {}) {
     return enviar(dest, content, o)
+  }
+
+  // Mensagens de um chat entre dois instantes (Unix segundos). Lê o histórico
+  // em disco (dias abrangidos) + o que está em memória, deduplicando por id.
+  // Retorna objetos "message" (com downloadMedia/getContact) ordenados por tempo.
+  client.mensagensDoPeriodo = async function (jid, iniTs, fimTs) {
+    const porId = new Map()
+    const considerar = (raw) => {
+      const ts = Number(raw?.messageTimestamp) || 0
+      if (ts < iniTs || ts > fimTs) return
+      const id = raw?.key?.id
+      if (!id || porId.has(id)) return
+      porId.set(id, raw)
+    }
+    // Dias abrangidos (YYYY-MM-DD) do início ao fim.
+    const dias = new Set()
+    for (let t = iniTs; t <= fimTs + 86400; t += 43200) {
+      dias.add(new Date(t * 1000).toLocaleDateString('en-CA'))
+    }
+    for (const dia of dias) {
+      try {
+        const txt = readFileSync(`${HIST_DIR}/${dia}.jsonl`, 'utf8')
+        for (const linha of txt.split('\n')) {
+          if (!linha.trim()) continue
+          let obj
+          try { obj = JSON.parse(linha) } catch { continue }
+          if (obj.jid === jid && obj.raw) considerar(obj.raw)
+        }
+      } catch {}
+    }
+    // Complementa com o que está só em memória (ainda não relido).
+    for (const raw of (msgStore.get(jid) || [])) considerar(raw)
+
+    return [...porId.values()]
+      .sort((a, b) => (Number(a.messageTimestamp) || 0) - (Number(b.messageTimestamp) || 0))
+      .map((r) => fazerMsg(r))
   }
 
   client.getContactById = async function (jid) {
