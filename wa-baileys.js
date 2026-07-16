@@ -377,10 +377,34 @@ export function createClient(opts = {}) {
       logger: silentLogger,
       browser: Browsers.ubuntu('Chrome'),
       markOnlineOnConnect: false,
-      syncFullHistory: false,
+      syncFullHistory: true, // puxa o histórico recente ao conectar (p/ resumo do dia)
+      shouldSyncHistoryMessage: () => true,
     })
 
     sock.ev.on('creds.update', saveCreds)
+
+    // Sincronismo de histórico do WhatsApp (ao conectar/pós-pareamento):
+    // guarda as mensagens no histórico persistente SEM reprocessar como demanda,
+    // e aprende os nomes dos grupos. É o que permite "resumo do dia" pegar
+    // mensagens anteriores ao boot.
+    sock.ev.on('messaging-history.set', ({ chats, messages }) => {
+      try {
+        for (const c of chats || []) {
+          if (c?.id && String(c.id).endsWith('@g.us') && (c.name || c.subject)) {
+            groupCache.set(c.id, c.name || c.subject)
+          }
+        }
+        if (chats?.length) salvarGrupos()
+        let n = 0
+        for (const raw of messages || []) {
+          const jid = raw?.key?.remoteJid
+          if (!raw?.message || !jid || jid === 'status@broadcast') continue
+          guardar(jid, raw)
+          n++
+        }
+        if (n) console.log(`🗂️  Histórico sincronizado: ${n} mensagem(ns), ${(chats || []).length} chat(s).`)
+      } catch {}
+    })
 
     sock.ev.on('connection.update', async (u) => {
       const { connection, lastDisconnect, qr } = u
