@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.2.0'
+const VERSION = '2.2.1'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let loopsStarted = false
@@ -688,6 +688,9 @@ function normalizarSiteMonitor(site) {
     watchMaquinas: site.watchMaquinas !== false && site.watch_maquinas !== false,
     maquinaOfflineMin: Number(site.maquinaOfflineMin || site.maquina_offline_min || 15),
     maquinaAlertEveryMs: Number(site.maquinaAlertEveryMs || site.maquina_alert_every_ms || 30 * 60 * 1000),
+    // De quanto em quanto tempo consultar o status das máquinas (economia de
+    // chamadas na API de dados). Padrão 5 min — independente do check de site.
+    maquinaCheckEveryMs: Number(site.maquinaCheckEveryMs || site.maquina_check_every_ms || 5 * 60 * 1000),
   }
 }
 
@@ -952,7 +955,7 @@ async function buscarIdsMaquinas(site) {
 async function checarMaquinasSite(site) {
   if (!site.watchMaquinas || deepNaoAplica.has(site.key)) return
   const agora = Date.now()
-  if (agora - (maqUltimaChecagem.get(site.key) || 0) < site.checkEveryMs) return
+  if (agora - (maqUltimaChecagem.get(site.key) || 0) < site.maquinaCheckEveryMs) return
   maqUltimaChecagem.set(site.key, agora)
 
   const ids = await buscarIdsMaquinas(site)
