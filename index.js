@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.3.2'
+const VERSION = '2.3.3'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -609,7 +609,8 @@ async function tratarComando(msg, textoOverride = null) {
     const chats = await client.getChats()
     const grupo = chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(nomeG.toLowerCase()))
     if (!grupo) return msg.reply(`❌ Não achei o grupo "${nomeG}". Mande *grupos* pra ver a lista.`)
-    await resumirPeriodo(msg, grupo, diaPriv.ini, diaPriv.fim, true, diaPriv.label, `${RESUMO_DIA_DESTINO}@c.us`)
+    // Pedido no PRIVADO -> entrega o PDF nesta mesma conversa (destino = null = msg.from).
+    await resumirPeriodo(msg, grupo, diaPriv.ini, diaPriv.fim, true, diaPriv.label)
     return
   }
 
