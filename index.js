@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.0.0'
+const VERSION = '2.1.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let monitorLoopStarted = false
@@ -650,6 +650,9 @@ async function enviarNoGrupo(nome, texto) {
 // avisa admins no WhatsApp quando um site fica lento/fora. Não usa IA.
 const monitorState = new Map()
 let monitorSilenciadoAte = 0
+// Sites onde a verificação profunda não se aplica (ex: não têm /proxy.php).
+// Descoberto em runtime (primeiro deep check devolve 400/404) e cacheado.
+const deepNaoAplica = new Set()
 
 function normalizarSiteMonitor(site) {
   if (!site || site.enabled === false) return null
@@ -668,6 +671,13 @@ function normalizarSiteMonitor(site) {
     slowAfter: Number(site.slowAfter || site.slow_after || 3),
     recoverAfter: Number(site.recoverAfter || site.recover_after || 2),
     screenshot: site.screenshot !== false,
+    // Verificação PROFUNDA: além de abrir a página, testa o caminho de DADOS
+    // (carregar máquinas) — que é o que costuma travar mesmo com a página no ar.
+    // Ativada por padrão nos dashboards; auto-desliga em sites sem /proxy.php.
+    deep: site.deep !== false && site.deep_check !== false,
+    deepPath: String(site.deepPath || site.deep_path || 'proxy.php'),
+    deepEndpoint: String(site.deepEndpoint || site.deep_endpoint || 'maquinas'),
+    deepSlowMs: Number(site.deepSlowMs || site.deep_slow_ms || 6000),
   }
 }
 
@@ -677,6 +687,52 @@ function ehPedidoSilenciarAlertas(texto) {
 
 function ehPedidoReativarAlertas(texto) {
   return /^(voltar alertas|reativar alertas|ativar alertas|\/unmute-sites)\b/i.test(String(texto || '').trim())
+}
+
+/**
+ * Verificação PROFUNDA: bate no caminho de DADOS do dashboard
+ * (POST /proxy.php?e=maquinas), que repassa pro ajlogs. É o que trava quando
+ * "a página abre mas as máquinas não carregam" (ou o login pendura, pois passa
+ * pelo mesmo ajlogs). Não precisa de senha — a chave fica no proxy do servidor.
+ * Retorna { status:'ok'|'slow'|'down', ms, detail } ou { applicable:false }.
+ */
+async function medirDadosSite(site) {
+  const base = String(site.url).replace(/\/+$/, '')
+  const url = `${base}/${site.deepPath}?e=${site.deepEndpoint}`
+  const ini = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), site.timeoutMs)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'User-Agent': `MalhariasBot-Monitor/${VERSION}` },
+      body: '{}',
+    })
+    const ms = Date.now() - ini
+    // Site sem esse endpoint (ex: o hub Laravel não tem /proxy.php) -> não se aplica.
+    if (res.status === 400 || res.status === 404) return { applicable: false }
+    if (!res.ok || [500, 502, 503, 504].includes(res.status)) {
+      return { status: 'down', ms, detail: `dados HTTP ${res.status}` }
+    }
+    const txt = await res.text()
+    let data = null
+    try { data = JSON.parse(txt) } catch {}
+    const arr = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : null)
+    if (!arr) {
+      if (data?.error || data?.status?.erro) return { status: 'down', ms, detail: 'API de dados retornou erro' }
+      return { status: 'down', ms, detail: 'dados vazios/inválidos' }
+    }
+    if (ms > site.deepSlowMs) return { status: 'slow', ms, detail: `dados em ${ms}ms` }
+    return { status: 'ok', ms, detail: `${arr.length} máquina(s) em ${ms}ms` }
+  } catch (e) {
+    const ms = Date.now() - ini
+    const detail = e.name === 'AbortError' ? `timeout ${site.timeoutMs}ms carregando as máquinas` : e.message
+    return { status: 'down', ms, detail }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function medirSite(site) {
@@ -694,6 +750,27 @@ async function medirSite(site) {
     if (!res.ok || [500, 502, 503, 504].includes(res.status)) {
       return { status: 'down', ms, detail: `HTTP ${res.status}` }
     }
+
+    // Página abriu. Agora testa o caminho de DADOS (carregar máquinas / login),
+    // que é o que costuma travar de verdade.
+    if (site.deep && !deepNaoAplica.has(site.key)) {
+      const d = await medirDadosSite(site)
+      if (d.applicable === false) {
+        deepNaoAplica.add(site.key) // site sem proxy de dados: só checa a página
+      } else if (d.status === 'down') {
+        return { status: 'down', ms: d.ms, detail: `página abre, mas as máquinas não carregam — ${d.detail}` }
+      } else if (d.status === 'slow' || ms > site.slowMs) {
+        const lentoPagina = ms > site.slowMs
+        return {
+          status: 'slow',
+          ms: Math.max(ms, d.ms),
+          detail: lentoPagina ? `página lenta (${ms}ms)` : `máquinas lentas p/ carregar (${d.ms}ms)`,
+        }
+      } else {
+        return { status: 'ok', ms, detail: `página ${ms}ms · ${d.detail}` }
+      }
+    }
+
     if (ms > site.slowMs) {
       return { status: 'slow', ms, detail: `respondeu em ${ms}ms` }
     }
@@ -802,7 +879,10 @@ async function checarSiteMonitor(site) {
 
   if (['down', 'slow'].includes(novoEstado) && podeAlertar) {
     st.lastAlertAt = now
-    const titulo = novoEstado === 'down' ? '🚨 *Site fora do ar*' : '⚠️ *Site lento*'
+    const ehDados = /não carregam|máquinas|dados/i.test(r.detail || '')
+    const titulo = novoEstado === 'down'
+      ? (ehDados ? '🚨 *Máquinas não carregam*' : '🚨 *Site fora do ar*')
+      : '⚠️ *Site lento*'
     const texto =
       `${titulo}\n` +
       `${site.nome}\n` +
