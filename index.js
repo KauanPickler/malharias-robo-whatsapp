@@ -4,15 +4,14 @@
  * Escuta os grupos do WhatsApp (somente LEITURA, nunca envia) e manda cada
  * mensagem para o hub, que classifica com IA e registra como demanda.
  *
- * ⚠️ AVISO: usa whatsapp-web.js (não-oficial). Isso viola os Termos do WhatsApp
+ * ⚠️ AVISO: usa Baileys (não-oficial). Isso viola os Termos do WhatsApp
  * e o número PODE ser banido. Use SEMPRE um chip dedicado, nunca o pessoal.
  *
  * Rodar:  npm install  &&  npm start
  * Na 1ª vez, escaneie o QR code que aparece no terminal com o chip dedicado.
  */
 
-import pkg from 'whatsapp-web.js'
-const { Client, LocalAuth, MessageMedia } = pkg
+import { createClient, MessageMedia } from './wa-baileys.js'
 import qrcode from 'qrcode-terminal'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
@@ -78,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '1.12.0'
+const VERSION = '2.0.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let monitorLoopStarted = false
@@ -988,44 +987,10 @@ async function askAssistente(msg, textoOverride = null) {
   }
 }
 
-// Opções do Chrome headless. Em Raspberry/mini-PC é melhor usar o Chromium do
-// sistema (config.chromiumPath) e a flag --disable-dev-shm-usage (evita travar
-// por falta de /dev/shm em máquinas com pouca RAM).
-const puppeteerOpts = {
-  headless: true,
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-  ],
-}
-if (config.chromiumPath) {
-  puppeteerOpts.executablePath = config.chromiumPath
-}
-
-// Fixa a versão do WhatsApp Web (workaround p/ o "Execution context destroyed"
-// quando o WhatsApp Web atualiza e quebra o whatsapp-web.js). Se existir o
-// arquivo web-version.txt com um número (ex: 2.3000.1041450038-alpha), usa ele.
-let webVersionCache = { type: 'local' }
-try {
-  if (existsSync('web-version.txt')) {
-    const v = readFileSync('web-version.txt', 'utf8').trim()
-    if (v) {
-      webVersionCache = {
-        type: 'remote',
-        remotePath: `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${v}.html`,
-      }
-      console.log(`📌 Fixando WhatsApp Web na versão ${v}`)
-    }
-  }
-} catch {}
-
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: './sessao' }), // sessão persistente
-  puppeteer: puppeteerOpts,
-  webVersionCache,
-})
+// Conexão via Baileys (protocolo direto por WebSocket, sem navegador). A sessão
+// fica em ./sessao-baileys (persistente). O adaptador wa-baileys.js expõe a mesma
+// API que o código já usava (client.getChats, msg.reply, downloadMedia, etc.).
+const client = createClient({ sessionDir: './sessao-baileys' })
 
 let pairCodeRequested = false
 client.on('qr', async (qr) => {

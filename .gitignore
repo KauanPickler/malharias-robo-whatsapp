@@ -1,5 +1,6 @@
 node_modules/
 sessao/
+sessao-baileys/
 config.js
 .DS_Store
 admin-chats.json
