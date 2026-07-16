@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.1.0'
+const VERSION = '2.2.0'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let monitorLoopStarted = false
@@ -654,6 +654,11 @@ let monitorSilenciadoAte = 0
 // Descoberto em runtime (primeiro deep check devolve 400/404) e cacheado.
 const deepNaoAplica = new Set()
 
+// Estado por máquina p/ o alerta de offline: `${site.key}:${maquina}` -> {...}
+const maquinaState = new Map()
+// Cache dos ids de máquina por site (evita chamar 'maquinas' toda vez).
+const maquinasIdsCache = new Map() // site.key -> { ids:[], at }
+
 function normalizarSiteMonitor(site) {
   if (!site || site.enabled === false) return null
   const url = String(site.url || '').trim()
@@ -678,6 +683,11 @@ function normalizarSiteMonitor(site) {
     deepPath: String(site.deepPath || site.deep_path || 'proxy.php'),
     deepEndpoint: String(site.deepEndpoint || site.deep_endpoint || 'maquinas'),
     deepSlowMs: Number(site.deepSlowMs || site.deep_slow_ms || 6000),
+    // Alerta de MÁQUINA offline (parou de enviar dados). Ignora "parada"
+    // (máquina desligada mas ainda reportando). Ativo por padrão nos dashboards.
+    watchMaquinas: site.watchMaquinas !== false && site.watch_maquinas !== false,
+    maquinaOfflineMin: Number(site.maquinaOfflineMin || site.maquina_offline_min || 15),
+    maquinaAlertEveryMs: Number(site.maquinaAlertEveryMs || site.maquina_alert_every_ms || 30 * 60 * 1000),
   }
 }
 
@@ -899,12 +909,116 @@ async function checarSiteMonitor(site) {
   monitorState.set(site.key, st)
 }
 
+// Normaliza o id da máquina ("01" e 1 viram "1") p/ comparar entre 'maquinas'
+// (que devolve "01") e 'status-maquina' (que devolve 1).
+function normId(x) {
+  const s = String(x ?? '').trim()
+  const n = Number(s)
+  return Number.isFinite(n) && s !== '' ? String(n) : s
+}
+
+// Última vez que rodamos o check de máquinas por site (throttle).
+const maqUltimaChecagem = new Map()
+
+/** Lista de ids de máquina do site (cacheada ~10min). */
+async function buscarIdsMaquinas(site) {
+  const cached = maquinasIdsCache.get(site.key)
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.ids
+  const base = String(site.url).replace(/\/+$/, '')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), site.timeoutMs)
+  try {
+    const res = await fetch(`${base}/${site.deepPath}?e=${site.deepEndpoint}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: controller.signal,
+    })
+    if (!res.ok) return cached?.ids || []
+    const data = await res.json().catch(() => null)
+    const arr = Array.isArray(data) ? data : []
+    const ids = arr.map((m) => normId(m.maquina)).filter(Boolean)
+    if (ids.length) maquinasIdsCache.set(site.key, { ids, at: Date.now() })
+    return ids
+  } catch {
+    return cached?.ids || []
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Alerta quando uma MÁQUINA fica offline (para de enviar dados) além do limite.
+ * Ignora o status "parada" — só importa se a máquina sumiu do status-maquina.
+ * Espelha a lógica do dashboard (success = presença).
+ */
+async function checarMaquinasSite(site) {
+  if (!site.watchMaquinas || deepNaoAplica.has(site.key)) return
+  const agora = Date.now()
+  if (agora - (maqUltimaChecagem.get(site.key) || 0) < site.checkEveryMs) return
+  maqUltimaChecagem.set(site.key, agora)
+
+  const ids = await buscarIdsMaquinas(site)
+  if (!ids.length) return
+
+  // Status atual de todas as máquinas do site.
+  let onlineSet
+  const base = String(site.url).replace(/\/+$/, '')
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), site.timeoutMs)
+  try {
+    const res = await fetch(`${base}/${site.deepPath}?e=status-maquina`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ maquinas: ids.join(',') }),
+      signal: controller.signal,
+    })
+    if (!res.ok) return // API de dados fora: o alerta de SITE já cobre; não marca máquina.
+    const data = await res.json().catch(() => null)
+    const rows = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : null)
+    if (!rows) return
+    onlineSet = new Set(rows.filter((r) => r && r.success !== false).map((r) => normId(r.maquina)))
+  } catch {
+    return // erro de rede: não marca offline (evita falso positivo)
+  } finally {
+    clearTimeout(timer)
+  }
+
+  const offlineMs = site.maquinaOfflineMin * 60 * 1000
+  const silenciado = agora < monitorSilenciadoAte
+
+  for (const id of ids) {
+    const key = `${site.key}:${id}`
+    let st = maquinaState.get(key)
+    if (!st) { st = { lastSeenAt: agora, alerted: false, lastAlertAt: 0 }; maquinaState.set(key, st) }
+
+    if (onlineSet.has(id)) {
+      st.lastSeenAt = agora
+      if (st.alerted) {
+        st.alerted = false
+        if (!silenciado) await avisarAdminsMonitor(`✅ *Máquina voltou* — ${site.nome}\nMáquina ${id} voltou a enviar dados.`)
+      }
+      continue
+    }
+
+    const foraMs = agora - st.lastSeenAt
+    if (foraMs >= offlineMs && !silenciado && (!st.alerted || agora - st.lastAlertAt >= site.maquinaAlertEveryMs)) {
+      st.alerted = true
+      st.lastAlertAt = agora
+      const min = Math.round(foraMs / 60000)
+      await avisarAdminsMonitor(
+        `🔌 *Máquina offline* — ${site.nome}\n` +
+        `Máquina ${id} parou de enviar dados há ~${min} min.\n\n` +
+        `Para silenciar: *parar alertas*`,
+      )
+    }
+  }
+}
+
 async function monitorSitesLoop() {
   try {
     if (!whatsappReady) return
     const sites = (cfg().monitorSites || []).map(normalizarSiteMonitor).filter(Boolean)
     for (const site of sites) {
       await checarSiteMonitor(site)
+      await checarMaquinasSite(site)
     }
   } catch (e) {
     console.warn('⚠️ Erro no monitor de sites:', e.message)
