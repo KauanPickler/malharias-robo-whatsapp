@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.3.3'
+const VERSION = '2.4.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -326,31 +326,100 @@ function parseDia(texto) {
   return null
 }
 
-/** Gera um PDF (pdfkit) a partir do resumo em markdown simples. Retorna Buffer. */
+/** Gera um PDF (pdfkit) com visual de relatório a partir do markdown do resumo. */
 async function gerarPdf(titulo, subtitulo, conteudo) {
   const PDFDocument = (await import('pdfkit')).default
   return await new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' })
+    const doc = new PDFDocument({ margin: 0, size: 'A4', bufferPages: true })
     const chunks = []
     doc.on('data', (c) => chunks.push(c))
     doc.on('end', () => resolve(Buffer.concat(chunks)))
     doc.on('error', reject)
-    doc.fontSize(18).fillColor('#111').text(titulo)
-    if (subtitulo) doc.moveDown(0.2).fontSize(10).fillColor('#666').text(subtitulo)
-    doc.moveDown(0.6)
-    for (const raw of String(conteudo).split(/\r?\n/)) {
-      const t = raw.trim()
-      if (!t) { doc.moveDown(0.35); continue }
-      const limpo = t.replace(/\*\*(.+?)\*\*/g, '$1')
-      if (/^#{1,6}\s+/.test(t)) {
-        doc.moveDown(0.3).fontSize(13).fillColor('#0a3d62').text(limpo.replace(/^#+\s+/, ''))
-        doc.fillColor('#000')
-      } else if (/^[-*•]\s+/.test(t)) {
-        doc.fontSize(11).fillColor('#000').text('•  ' + limpo.replace(/^[-*•]\s+/, ''), { indent: 12 })
-      } else {
-        doc.fontSize(11).fillColor('#000').text(limpo)
-      }
+
+    const PW = doc.page.width
+    const PH = doc.page.height
+    const M = 48
+    const CW = PW - M * 2
+    const ACC = '#12365E'   // header / títulos
+    const ACC2 = '#2A6F97'  // bullets nível 0
+    const TXT = '#233240'   // corpo
+    const MUT = '#7A8794'   // secundário
+    const LINE = '#E4E9F0'  // réguas
+    const topo = () => 48
+    const base = () => PH - 54
+
+    // Cabeçalho colorido (faixa) — repetido em cada página nova.
+    function faixaTopo() {
+      doc.rect(0, 0, PW, 92).fill(ACC)
+      doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(19).text(titulo, M, 26, { width: CW })
+      if (subtitulo) doc.fillColor('#BFD2E6').font('Helvetica').fontSize(9).text(subtitulo, M, 58, { width: CW })
+      doc.y = 116
+      doc.x = M
     }
+    faixaTopo()
+
+    function novaPaginaSePreciso(h) {
+      if (doc.y + h > base()) { doc.addPage(); faixaTopo() }
+    }
+
+    // Escreve uma linha com **negrito** inline; opcionalmente com bullet e indent.
+    function linhaRica(txt, { x = M, size = 10.5, cor = TXT, prefixo = null, prefixoCor = ACC2, gapDepois = 0.15 } = {}) {
+      novaPaginaSePreciso(size + 8)
+      doc.fontSize(size)
+      const larg = PW - M - x
+      const segs = []
+      if (prefixo) segs.push({ t: prefixo, bold: true, cor: prefixoCor })
+      for (const p of String(txt).split(/(\*\*[^*]+\*\*)/g)) {
+        if (!p) continue
+        const b = p.startsWith('**') && p.endsWith('**')
+        segs.push({ t: b ? p.slice(2, -2) : p, bold: b, cor })
+      }
+      segs.forEach((s, i) => {
+        doc.font(s.bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(s.cor)
+        if (i === 0) doc.text(s.t, x, doc.y, { width: larg, continued: i < segs.length - 1, lineGap: 2 })
+        else doc.text(s.t, { width: larg, continued: i < segs.length - 1, lineGap: 2 })
+      })
+      if (gapDepois) doc.moveDown(gapDepois)
+    }
+
+    for (const raw of String(conteudo).split(/\r?\n/)) {
+      const t = raw.replace(/\s+$/, '')
+      if (!t.trim()) { doc.moveDown(0.25); continue }
+
+      // Título de seção (## ...)
+      if (/^#{1,6}\s+/.test(t)) {
+        const tit = t.replace(/^#+\s+/, '').replace(/\*\*/g, '').replace(/:$/, '')
+        novaPaginaSePreciso(34)
+        doc.moveDown(0.55)
+        doc.font('Helvetica-Bold').fontSize(12.5).fillColor(ACC).text(tit, M, doc.y, { width: CW })
+        const y = doc.y + 3
+        doc.moveTo(M, y).lineTo(M + CW, y).lineWidth(1).strokeColor(LINE).stroke()
+        doc.moveDown(0.5)
+        continue
+      }
+
+      // Bullet (com nível pela indentação)
+      const mB = t.match(/^(\s*)[-*•]\s+(.*)$/)
+      if (mB) {
+        const nivel = Math.min(2, Math.floor(mB[1].length / 2))
+        const x = M + 6 + nivel * 16
+        linhaRica(mB[2], { x, size: 10.5, prefixo: (nivel === 0 ? '•' : '–') + '  ', prefixoCor: nivel === 0 ? ACC2 : MUT })
+        continue
+      }
+
+      // Parágrafo normal
+      linhaRica(t, { x: M, size: 10.5, gapDepois: 0.25 })
+    }
+
+    // Rodapé com paginação em todas as páginas.
+    const range = doc.bufferedPageRange()
+    for (let i = 0; i < range.count; i++) {
+      doc.switchToPage(range.start + i)
+      doc.font('Helvetica').fontSize(8).fillColor(MUT)
+        .text(`Robô Malharias · ${new Date().toLocaleString('pt-BR')}`, M, PH - 40, { width: CW / 2, align: 'left', lineBreak: false })
+        .text(`Página ${i + 1} de ${range.count}`, M + CW / 2, PH - 40, { width: CW / 2, align: 'right', lineBreak: false })
+    }
+
     doc.end()
   })
 }
