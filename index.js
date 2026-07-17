@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.4.0'
+const VERSION = '2.4.1'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -310,20 +310,38 @@ function parsePeriodo(texto) {
   return { ini, fim, label: `${String(m[1]).padStart(2, '0')}:${m[2]} às ${String(m[3]).padStart(2, '0')}:${m[4]}` }
 }
 
-/** Detecta pedido de resumo de um DIA inteiro: "hoje", "de hoje", "ontem". */
+/** Detecta pedido de resumo por DIA: "hoje", "ontem", ou "ontem e hoje". */
 function parseDia(texto) {
   const t = (texto || '').toLowerCase()
-  if (/\bontem\b/.test(t)) {
+  const temOntem = /\bontem\b/.test(t)
+  const temHoje = /\bhoje\b|dia de hoje|\bdo dia\b|de hoje/.test(t)
+  const br = (d) => d.toLocaleDateString('pt-BR')
+
+  // "ontem e hoje" (ou "hoje e ontem") -> intervalo de ontem 00:00 até agora.
+  if (temOntem && temHoje) {
+    const ini = new Date(); ini.setDate(ini.getDate() - 1); ini.setHours(0, 0, 0, 0)
+    const fim = new Date()
+    return { ini, fim, label: `ontem e hoje (${br(ini)} a ${br(fim)})` }
+  }
+  if (temOntem) {
     const ini = new Date(); ini.setDate(ini.getDate() - 1); ini.setHours(0, 0, 0, 0)
     const fim = new Date(ini); fim.setHours(23, 59, 59, 999)
-    return { ini, fim, label: `ontem ${ini.toLocaleDateString('pt-BR')}` }
+    return { ini, fim, label: `ontem ${br(ini)}` }
   }
-  if (/\bhoje\b|dia de hoje|\bdo dia\b|de hoje/.test(t)) {
+  if (temHoje) {
     const ini = new Date(); ini.setHours(0, 0, 0, 0)
     const fim = new Date() // até agora
-    return { ini, fim, label: `hoje ${ini.toLocaleDateString('pt-BR')}` }
+    return { ini, fim, label: `hoje ${br(ini)}` }
   }
   return null
+}
+
+/** Extrai o nome do grupo do comando, cortando na parte de período/qualificadores. */
+function extrairNomeGrupo(textoAposGrupo) {
+  return String(textoAposGrupo || '')
+    .replace(/\s+(de\s+ontem|de\s+hoje|do\s+dia|dia\s+de\s+hoje|no\s+dia\b|ontem\b|hoje\b|das?\s+\d|entre\s+\d|em\s+pdf\b|para\s+mim\b|pra\s+mim\b).*$/i, '')
+    .replace(/\s+\d{1,2}[:h]\d{2}.*$/, '')
+    .trim()
 }
 
 /** Gera um PDF (pdfkit) com visual de relatório a partir do markdown do resumo. */
@@ -667,13 +685,7 @@ async function tratarComando(msg, textoOverride = null) {
   // "resuma o grupo Operação JM hoje" / "resumo do grupo JM de hoje"
   const diaPriv = parseDia(texto)
   if (diaPriv && idx >= 0) {
-    let nomeG = texto.slice(idx + 5)
-      .replace(/\b(de\s+)?hoje\b.*/i, '')
-      .replace(/\bdia de hoje\b.*/i, '')
-      .replace(/\bdo dia\b.*/i, '')
-      .replace(/\bontem\b.*/i, '')
-      .replace(/\bem pdf\b.*/i, '')
-      .trim()
+    const nomeG = extrairNomeGrupo(texto.slice(idx + 5))
     if (!nomeG) return msg.reply('Qual grupo? Ex: *resuma o grupo Operação JM hoje*')
     const chats = await client.getChats()
     const grupo = chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(nomeG.toLowerCase()))
