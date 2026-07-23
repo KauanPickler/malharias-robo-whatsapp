@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.4.1'
+const VERSION = '2.5.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -116,6 +116,7 @@ const DEFAULT_MONITOR_SITES = [
 /** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
 async function heartbeatLoop() {
   try {
+    const notification = notificationState()
     await fetch(`${config.hubUrl}/api/robo/heartbeat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -125,6 +126,9 @@ async function heartbeatLoop() {
         started_at: bootTime,
         whatsapp: whatsappReady,
         version: VERSION,
+        notifications_quiet: notification.quiet,
+        notification_reason: notification.reason,
+        monitor_sites: monitorSnapshot(),
       }),
     })
   } catch {}
@@ -194,8 +198,64 @@ function cfg() {
     controleNumeros: remote.controle_numeros ?? config.controleNumeros ?? [],
     notificarDemandas: remote.notificar_demandas ?? config.notificarDemandas ?? true,
     somenteMapeados: remote.somente_mapeados ?? config.somenteMapeados ?? false,
+    notificationSettings: remote.notification_settings ?? {
+      mode: 'normal',
+      night_enabled: false,
+      night_start: '22:00',
+      night_end: '07:00',
+      timezone: 'America/Sao_Paulo',
+    },
     monitorSites,
   }
+}
+
+function minutosNoFuso(timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone || 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date())
+    const hour = Number(parts.find((part) => part.type === 'hour')?.value || 0)
+    const minute = Number(parts.find((part) => part.type === 'minute')?.value || 0)
+    return hour * 60 + minute
+  } catch {
+    const now = new Date()
+    return now.getHours() * 60 + now.getMinutes()
+  }
+}
+
+function horarioEmMinutos(value, fallback) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || ''))
+  if (!match) return fallback
+  return Number(match[1]) * 60 + Number(match[2])
+}
+
+/** Estado efetivo das notificações: pausa temporária, silencioso ou agenda noturna. */
+function notificationState() {
+  if (Date.now() < monitorSilenciadoAte) {
+    return { quiet: true, reason: 'temporary' }
+  }
+
+  const settings = cfg().notificationSettings || {}
+  if (settings.mode === 'silent') {
+    return { quiet: true, reason: 'silent' }
+  }
+
+  if (settings.night_enabled) {
+    const now = minutosNoFuso(settings.timezone)
+    const start = horarioEmMinutos(settings.night_start, 22 * 60)
+    const end = horarioEmMinutos(settings.night_end, 7 * 60)
+    const inNight = start < end ? now >= start && now < end : now >= start || now < end
+    if (inNight) return { quiet: true, reason: 'night' }
+  }
+
+  return { quiet: false, reason: null }
+}
+
+function notificacoesPermitidas() {
+  return !notificationState().quiet
 }
 
 /** Reporta ao hub a lista de grupos que o bot enxerga (para selecionar no painel). */
@@ -663,8 +723,7 @@ async function tratarComando(msg, textoOverride = null) {
   }
 
   if (ehPedidoReativarAlertas(lower)) {
-    monitorSilenciadoAte = 0
-    return msg.reply('🔔 Alertas de sites reativados.')
+    return msg.reply(reativarAlertasMonitor())
   }
 
   if (lower === 'grupos' || lower === '/grupos') {
@@ -739,7 +798,7 @@ async function notificarDemandasLoop() {
     // fallback, os números configurados no formato @c.us.
     const destinos = adminChats.size ? [...adminChats] : admins.map((n) => `${n}@c.us`)
 
-    if (c.notificarDemandas !== false && destinos.length) {
+    if (c.notificarDemandas !== false && destinos.length && notificacoesPermitidas()) {
       const res = await fetch(
         `${config.hubUrl}/api/robo/demandas-novas?token=${encodeURIComponent(config.ingestToken)}`,
       )
@@ -1007,10 +1066,12 @@ async function checarSiteMonitor(site) {
       const duracaoMin = st.downSince ? Math.round((now - st.downSince) / 60000) : 0
       st.state = 'ok'
       st.downSince = null
-      st.lastAlertAt = now
-      await avisarAdminsMonitor(
-        `✅ *Site normalizou*\n${site.nome}\n${site.url}\nResposta: ${r.detail}${duracaoMin ? `\nTempo afetado: ~${duracaoMin} min` : ''}`,
-      )
+      if (notificacoesPermitidas()) {
+        st.lastAlertAt = now
+        await avisarAdminsMonitor(
+          `✅ *Site normalizou*\n${site.nome}\n${site.url}\nResposta: ${r.detail}${duracaoMin ? `\nTempo afetado: ~${duracaoMin} min` : ''}`,
+        )
+      }
     } else if (st.state === 'unknown') {
       st.state = 'ok'
     }
@@ -1030,7 +1091,7 @@ async function checarSiteMonitor(site) {
   const novoEstado = st.failCount >= site.failAfter ? 'down' : (st.slowCount >= site.slowAfter ? 'slow' : st.state)
   if (!st.downSince && ['down', 'slow'].includes(novoEstado)) st.downSince = now
 
-  const podeAlertar = now >= monitorSilenciadoAte && (now - st.lastAlertAt >= site.alertEveryMs || st.state !== novoEstado)
+  const podeAlertar = notificacoesPermitidas() && (now - st.lastAlertAt >= site.alertEveryMs || st.state !== novoEstado)
   st.state = novoEstado
 
   if (['down', 'slow'].includes(novoEstado) && podeAlertar) {
@@ -1128,7 +1189,7 @@ async function checarMaquinasSite(site) {
   }
 
   const offlineMs = site.maquinaOfflineMin * 60 * 1000
-  const silenciado = agora < monitorSilenciadoAte
+  const silenciado = !notificacoesPermitidas()
 
   for (const id of ids) {
     const key = `${site.key}:${id}`
@@ -1178,6 +1239,18 @@ function silenciarAlertasMonitor(minutos = 40) {
   return new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 }
 
+function reativarAlertasMonitor() {
+  monitorSilenciadoAte = 0
+  const state = notificationState()
+  if (state.reason === 'silent') {
+    return '🔕 A pausa temporária foi removida, mas o *modo silencioso* continua ativo no NexoK.'
+  }
+  if (state.reason === 'night') {
+    return '🌙 A pausa temporária foi removida, mas o *modo noturno* está ativo no NexoK.'
+  }
+  return '🔔 Alertas de sites reativados.'
+}
+
 function statusMonitorTexto() {
   const sites = (cfg().monitorSites || []).map(normalizarSiteMonitor).filter(Boolean)
   if (!sites.length) return 'Nenhum site configurado no monitor.'
@@ -1186,10 +1259,35 @@ function statusMonitorTexto() {
     const r = st?.lastResult
     return `• *${site.nome}*: ${st?.state || 'sem leitura'}${r ? ` — ${r.detail}` : ''}`
   })
-  if (Date.now() < monitorSilenciadoAte) {
-    linhas.push('', `Alertas silenciados até ${new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.`)
+  const notification = notificationState()
+  if (notification.quiet) {
+    const motivo = notification.reason === 'night'
+      ? 'modo noturno'
+      : notification.reason === 'silent'
+        ? 'modo silencioso'
+        : `pausa até ${new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+    linhas.push('', `Alertas silenciados: ${motivo}.`)
   }
   return linhas.join('\n')
+}
+
+function monitorSnapshot() {
+  return (cfg().monitorSites || [])
+    .map(normalizarSiteMonitor)
+    .filter(Boolean)
+    .slice(0, 50)
+    .map((site) => {
+      const state = monitorState.get(site.key)
+      return {
+        key: site.key,
+        name: site.nome,
+        url: site.url,
+        state: state?.state || 'unknown',
+        detail: state?.lastResult?.detail || null,
+        ms: Number(state?.lastResult?.ms || 0),
+        last_check_at: state?.lastCheckAt ? new Date(state.lastCheckAt).toISOString() : null,
+      }
+    })
 }
 
 /**
@@ -1198,6 +1296,10 @@ function statusMonitorTexto() {
  */
 async function avisosLoop() {
   try {
+    if (!notificacoesPermitidas()) {
+      setTimeout(avisosLoop, 60000)
+      return
+    }
     const res = await fetch(`${config.hubUrl}/api/robo/avisos?token=${encodeURIComponent(config.ingestToken)}`)
     if (res.ok) {
       const data = await res.json()
@@ -1489,8 +1591,7 @@ client.on('message', async (msg) => {
         return
       }
       if (numeroAutorizado(fromNum) && ehPedidoReativarAlertas(texto)) {
-        monitorSilenciadoAte = 0
-        await msg.reply('🔔 Alertas de sites reativados.')
+        await msg.reply(reativarAlertasMonitor())
         return
       }
       if (numeroAutorizado(fromNum) && /^(status sites|\/status-sites|\/sites|sites)$/i.test(texto)) {
@@ -1512,8 +1613,7 @@ client.on('message', async (msg) => {
             return
           }
           if (ehPedidoReativarAlertas(pergunta)) {
-            monitorSilenciadoAte = 0
-            await msg.reply('🔔 Alertas de sites reativados.')
+            await msg.reply(reativarAlertasMonitor())
             return
           }
           if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(pergunta)) {

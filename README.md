@@ -5,7 +5,7 @@ Malharias Hub, que classifica com IA e registra como **demanda**.
 
 ## ⚠️ Aviso importante
 
-Usa a biblioteca `whatsapp-web.js` (não-oficial). Isso **viola os Termos de
+Usa a biblioteca `Baileys` (não-oficial). Isso **pode violar os Termos de
 Serviço do WhatsApp** e o número **pode ser banido**. Por isso:
 
 - **Use SEMPRE um chip dedicado** (nunca seu número pessoal/da empresa).
@@ -15,7 +15,7 @@ Serviço do WhatsApp** e o número **pode ser banido**. Por isso:
 ## Pré-requisitos (no PC velho)
 
 1. **Node.js 18+** — https://nodejs.org (versão LTS)
-2. **Google Chrome** instalado (o robô usa ele por baixo)
+2. Acesso ao Malharias Hub para gerar o token do robô
 
 ## Instalação
 
@@ -37,7 +37,24 @@ npm start
 
 Na **primeira vez**, vai aparecer um **QR code** no terminal. Abra o WhatsApp do
 **chip dedicado** → Aparelhos conectados → Conectar um aparelho → escaneie.
-A sessão fica salva na pasta `sessao/` (não precisa escanear de novo).
+A sessão fica salva na pasta `sessao-baileys/` (não precisa parear de novo).
+
+## Controle pelo NexoK
+
+O Malharias Hub fornece uma API privada para o aplicativo NexoK. Em
+**Robô & IA → Controle pelo NexoK**, gere um token permanente e cadastre-o no
+aplicativo. O token fica salvo somente como hash no servidor.
+
+O aplicativo permite:
+
+- consultar o estado do robô, WhatsApp e sites monitorados;
+- usar o modo silencioso até reativação manual;
+- programar o modo noturno (por padrão, 22:00–07:00);
+- reiniciar ou atualizar o processo remotamente.
+
+Durante o silêncio, o monitor continua funcionando e as filas não são
+consumidas. As notificações pendentes voltam a ser enviadas quando o modo
+Normal for retomado.
 
 ## Como funciona
 
