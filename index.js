@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.5.1'
+const VERSION = '2.5.2'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -259,8 +259,10 @@ function notificacoesPermitidas() {
 }
 
 function ehPedidoStatusModo(texto) {
-  return /^(\/modo|modo|modo atual|status do modo|status modo|qual (?:é |e )?o modo|em qual modo|que modo)(?:\s+(?:est[aá]|estamos|ativo|atual|do bot|do rob[oô]))?[?!.\s]*$/i
-    .test(String(texto || '').trim())
+  const value = String(texto || '').trim()
+  return /(?:^|\b)(?:qual|que|em qual)\s+(?:é\s+|e\s+)?(?:o\s+)?modo\b/i.test(value)
+    || /\bmodo\s+(?:atual|est[aá]|ativo|do bot|do rob[oô])\b/i.test(value)
+    || /^\/modo\b/i.test(value)
 }
 
 function statusModoTexto() {
@@ -281,6 +283,13 @@ function statusModoTexto() {
     return `🌙 Modo atual: *Noturno* — notificações automáticas estão retidas.${schedule}`
   }
   return `🔔 Modo atual: *Normal* — notificações liberadas.${schedule}`
+}
+
+function statusVersaoTexto() {
+  const up = Math.round(process.uptime())
+  const h = Math.floor(up / 3600)
+  const m = Math.floor((up % 3600) / 60)
+  return `🤖 *Robô Malharias*\nVersão: *${VERSION}*\nNo ar há ${h}h ${m}m`
 }
 
 /** Reporta ao hub a lista de grupos que o bot enxerga (para selecionar no painel). */
@@ -719,6 +728,8 @@ async function salvarDocumento(msg, pend) {
 async function tratarComando(msg, textoOverride = null) {
   const texto = (textoOverride ?? msg.body ?? '').trim()
   const lower = texto.toLowerCase()
+  const pediuModo = ehPedidoStatusModo(lower)
+  const pediuVersao = lower.includes('versão') || lower.includes('versao') || lower.includes('version')
 
   if (lower === 'ajuda' || lower === '/ajuda' || lower === 'help' || lower === 'menu') {
     return msg.reply(
@@ -743,7 +754,11 @@ async function tratarComando(msg, textoOverride = null) {
     return msg.reply(statusMonitorTexto())
   }
 
-  if (ehPedidoStatusModo(lower)) {
+  if (pediuModo && pediuVersao) {
+    return msg.reply(`${statusVersaoTexto()}\n\n${statusModoTexto()}`)
+  }
+
+  if (pediuModo) {
     return msg.reply(statusModoTexto())
   }
 
@@ -761,10 +776,8 @@ async function tratarComando(msg, textoOverride = null) {
   }
 
   // Versão do robô — pra conferir se o Raspberry está rodando o código atualizado.
-  if (lower.includes('versão') || lower.includes('versao') || lower.includes('version')) {
-    const up = Math.round(process.uptime())
-    const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60)
-    return msg.reply(`🤖 *Robô Malharias*\nVersão: *${VERSION}*\nNo ar há ${h}h ${m}m`)
+  if (pediuVersao) {
+    return msg.reply(statusVersaoTexto())
   }
 
   // "resumo do grupo X" / "/resumo X" / "resumir grupo X"
