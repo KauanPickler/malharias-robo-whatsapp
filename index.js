@@ -77,7 +77,7 @@ let restartBaseline = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.5.0'
+const VERSION = '2.5.1'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -256,6 +256,31 @@ function notificationState() {
 
 function notificacoesPermitidas() {
   return !notificationState().quiet
+}
+
+function ehPedidoStatusModo(texto) {
+  return /^(\/modo|modo|modo atual|status do modo|status modo|qual (?:é |e )?o modo|em qual modo|que modo)(?:\s+(?:est[aá]|estamos|ativo|atual|do bot|do rob[oô]))?[?!.\s]*$/i
+    .test(String(texto || '').trim())
+}
+
+function statusModoTexto() {
+  const settings = cfg().notificationSettings || {}
+  const state = notificationState()
+  const schedule = settings.night_enabled
+    ? `\n🌙 Noturno programado: *${settings.night_start || '22:00'}–${settings.night_end || '07:00'}*`
+    : '\n🌙 Modo noturno: desativado'
+
+  if (state.reason === 'temporary') {
+    const ate = new Date(monitorSilenciadoAte).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    return `🔕 Modo atual: *pausa temporária* até ${ate}.${schedule}`
+  }
+  if (state.reason === 'silent') {
+    return `🔕 Modo atual: *Silencioso* — notificações pausadas até você reativar.${schedule}`
+  }
+  if (state.reason === 'night') {
+    return `🌙 Modo atual: *Noturno* — notificações automáticas estão retidas.${schedule}`
+  }
+  return `🔔 Modo atual: *Normal* — notificações liberadas.${schedule}`
 }
 
 /** Reporta ao hub a lista de grupos que o bot enxerga (para selecionar no painel). */
@@ -701,6 +726,7 @@ async function tratarComando(msg, textoOverride = null) {
         '• *resumo do grupo NOME* — resumo das mensagens do grupo\n' +
         '• *grupos* — lista os grupos disponíveis\n' +
         '• *status sites* — mostra o monitor de sites\n' +
+        '• *qual modo* — mostra o modo de notificações atual\n' +
         '• *parar alertas* — silencia alertas de sites por 40 min\n' +
         '• *versão* — mostra a versão do robô\n' +
         '• *reset* — limpa a conversa se eu travar\n\n' +
@@ -715,6 +741,10 @@ async function tratarComando(msg, textoOverride = null) {
 
   if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(lower)) {
     return msg.reply(statusMonitorTexto())
+  }
+
+  if (ehPedidoStatusModo(lower)) {
+    return msg.reply(statusModoTexto())
   }
 
   if (ehPedidoSilenciarAlertas(lower)) {
@@ -1598,6 +1628,10 @@ client.on('message', async (msg) => {
         await msg.reply(statusMonitorTexto())
         return
       }
+      if (numeroAutorizado(fromNum) && ehPedidoStatusModo(texto)) {
+        await msg.reply(statusModoTexto())
+        return
+      }
 
       const mencionou = await botFoiMencionado(msg, texto)
 
@@ -1618,6 +1652,10 @@ client.on('message', async (msg) => {
           }
           if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(pergunta)) {
             await msg.reply(statusMonitorTexto())
+            return
+          }
+          if (ehPedidoStatusModo(pergunta)) {
+            await msg.reply(statusModoTexto())
             return
           }
           // 1) Documento anexado ou citado -> lê ele.
