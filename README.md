@@ -48,8 +48,11 @@ aplicativo. O token fica salvo somente como hash no servidor.
 O aplicativo permite:
 
 - consultar o estado do robô, WhatsApp e sites monitorados;
+- visualizar logs operacionais e histórico de notificações;
+- acompanhar alertas pendentes, retidos, enviados e com falha;
 - usar o modo silencioso até reativação manual;
 - programar o modo noturno (por padrão, 22:00–07:00);
+- reconectar a sessão ou gerar um código de pareamento por telefone;
 - reiniciar ou atualizar o processo remotamente.
 
 Durante o silêncio, o monitor continua funcionando e as filas não são

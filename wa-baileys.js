@@ -18,7 +18,7 @@ import makeWASocket, {
   Browsers,
 } from 'baileys'
 import { EventEmitter } from 'events'
-import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, appendFileSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 
 // Logger no-op (Baileys exige interface pino; não queremos poluir o log).
 const silentLogger = {
@@ -361,6 +361,30 @@ export function createClient(opts = {}) {
 
   // Permite ao index.js pedir pairing por número (em vez de QR) antes de conectar.
   client.setPairNumber = function (n) { pairNumber = soDigitos(n) || null }
+
+  client.reconnect = async function () {
+    if (!sock) {
+      await start()
+      return
+    }
+    sock.end(new Error('Reconexão solicitada pelo NexoK'))
+  }
+
+  client.startPairing = async function (numero) {
+    const normalized = soDigitos(numero)
+    if (normalized.length < 10 || normalized.length > 15) throw new Error('Telefone inválido para pareamento.')
+
+    pairNumber = normalized
+    pairRequested = false
+    try {
+      if (sock) await sock.logout()
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    rmSync(sessionDir, { recursive: true, force: true })
+    mkdirSync(sessionDir, { recursive: true })
+    client.info = null
+    await start()
+  }
 
   // ---- conexão (com reconexão automática) ----
   async function start() {

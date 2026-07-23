@@ -15,6 +15,7 @@ import { createClient, MessageMedia } from './wa-baileys.js'
 import qrcode from 'qrcode-terminal'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
+import { randomUUID } from 'crypto'
 
 // Guarda os chats dos admins (quem comanda o bot) para enviar avisos.
 // Persiste em arquivo pra sobreviver a reinício.
@@ -74,16 +75,79 @@ let remote = {}
 let updateBaseline = null
 // Reinício remoto: baseline do "restart_nonce". Botão "Reiniciar robô" no painel.
 let restartBaseline = null
+let reconnectBaseline = null
+let pairRequestBaseline = null
+let activePairRequestId = null
+let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.5.2'
+const VERSION = '2.6.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
 let whatsappReady = false
 let botId = null // id do próprio bot no WhatsApp (preenchido no 'ready')
 let loopsStarted = false
+const eventBuffer = []
+let flushingEvents = false
+
+function registrarEvento({
+  type = 'log',
+  level = 'info',
+  category = 'system',
+  status = null,
+  title,
+  message = null,
+  context = null,
+  queueText = null,
+  queueGroup = null,
+}) {
+  eventBuffer.push({
+    event_id: randomUUID(),
+    type,
+    level,
+    category,
+    status,
+    title: String(title || 'Evento do robô').slice(0, 255),
+    message: message ? String(message).slice(0, 4000) : null,
+    context,
+    occurred_at: new Date().toISOString(),
+    queue_text: queueText,
+    queue_group: queueGroup,
+  })
+  if (eventBuffer.length > 500) eventBuffer.splice(0, eventBuffer.length - 500)
+}
+
+async function flushEventos() {
+  if (flushingEvents || !eventBuffer.length) return
+  flushingEvents = true
+  const batch = eventBuffer.slice(0, 50)
+  try {
+    const res = await fetch(`${config.hubUrl}/api/robo/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, events: batch }),
+      signal: AbortSignal.timeout(15000),
+    })
+    if (res.ok) eventBuffer.splice(0, batch.length)
+  } catch {
+    // Mantém o lote em memória e tenta novamente.
+  } finally {
+    flushingEvents = false
+  }
+}
+
+async function reportarPareamento(requestId, status, extra = {}) {
+  try {
+    await fetch(`${config.hubUrl}/api/robo/pairing-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, request_id: requestId, status, ...extra }),
+      signal: AbortSignal.timeout(15000),
+    })
+  } catch {}
+}
 
 const DEFAULT_MONITOR_SITES = [
   {
@@ -156,13 +220,37 @@ async function autoUpdateLoop() {
     if (upd !== null && String(upd) !== String(updateBaseline)) {
       updateBaseline = upd // marca como aplicado (evita repetir se o restart demorar)
       console.log('🔄 Atualização solicitada pelo hub — git pull + npm install + restart...')
+      registrarEvento({ type: 'action', category: 'system', status: 'completed', title: 'Atualização solicitada pelo NexoK' })
+      await flushEventos()
       rodarUpdate()
     }
     const rst = remote?.restart_nonce ?? null
     if (rst !== null && String(rst) !== String(restartBaseline)) {
       restartBaseline = rst
       console.log('♻️ Reinício solicitado pelo hub — saindo para o pm2 reerguer...')
+      registrarEvento({ type: 'action', category: 'system', status: 'completed', title: 'Reinício solicitado pelo NexoK' })
+      await flushEventos()
       setTimeout(() => process.exit(0), 500) // pm2 (autorestart) sobe de novo
+    }
+    const reconnect = remote?.reconnect_nonce ?? null
+    if (reconnect !== null && String(reconnect) !== String(reconnectBaseline)) {
+      reconnectBaseline = reconnect
+      registrarEvento({ type: 'action', category: 'session', status: 'completed', title: 'Reconexão solicitada pelo NexoK' })
+      await client.reconnect()
+    }
+
+    const pairRequest = remote?.pair_request
+    if (pairRequest?.status === 'requested' && pairRequest.request_id && pairRequest.request_id !== pairRequestBaseline) {
+      pairRequestBaseline = pairRequest.request_id
+      activePairRequestId = pairRequest.request_id
+      registrarEvento({ type: 'action', category: 'session', status: 'pending', title: 'Novo pareamento solicitado pelo NexoK' })
+      await reportarPareamento(activePairRequestId, 'processing')
+      try {
+        await client.startPairing(pairRequest.phone)
+      } catch (e) {
+        registrarEvento({ type: 'session', level: 'error', category: 'pairing', status: 'failed', title: 'Falha ao iniciar pareamento', message: e.message })
+        await reportarPareamento(activePairRequestId, 'failed', { error: e.message })
+      }
     }
   } catch {}
   setTimeout(autoUpdateLoop, 30000) // checa a cada 30s
@@ -178,8 +266,18 @@ async function carregarConfigRemota() {
     remote = await res.json()
     const nGrupos = Object.keys(remote.grupo_para_sistema || {}).length
     console.log(`⚙️  Config do hub carregada (${nGrupos} grupo(s) mapeado(s)).`)
+    const signature = JSON.stringify({
+      notifications: remote.notification_settings,
+      groups: nGrupos,
+      demands: remote.notificar_demandas,
+    })
+    if (lastRemoteSignature !== null && signature !== lastRemoteSignature) {
+      registrarEvento({ category: 'config', title: 'Configuração remota atualizada', context: { groups: nGrupos } })
+    }
+    lastRemoteSignature = signature
   } catch (e) {
     console.warn('⚠️ Falha ao buscar config do hub:', e.message, '— usando config.js local.')
+    registrarEvento({ level: 'error', category: 'config', title: 'Falha ao buscar configuração do Hub', message: e.message })
   }
 }
 
@@ -843,10 +941,11 @@ async function notificarDemandasLoop() {
 
     if (c.notificarDemandas !== false && destinos.length && notificacoesPermitidas()) {
       const res = await fetch(
-        `${config.hubUrl}/api/robo/demandas-novas?token=${encodeURIComponent(config.ingestToken)}`,
+        `${config.hubUrl}/api/robo/demandas-novas?ack=1&token=${encodeURIComponent(config.ingestToken)}`,
       )
       if (res.ok) {
         const data = await res.json()
+        const results = []
         for (const d of data.demandas || []) {
           const urg = d.urgencia === 'alta' ? '🔴' : d.urgencia === 'media' ? '🟡' : '🟢'
           const linhas = [
@@ -860,18 +959,39 @@ async function notificarDemandasLoop() {
           linhas.push('', `Responda aqui pra agir (ex: "marca a demanda ${d.id} como resolvida").`)
           const texto = linhas.join('\n')
 
+          let sent = 0
+          let failed = 0
+          let lastError = null
           for (const dest of destinos) {
             try {
               await client.sendMessage(dest, texto)
+              sent++
             } catch (e) {
+              failed++
+              lastError = e.message
               console.warn('⚠️ Falha ao avisar admin:', e.message)
             }
           }
+          const status = sent ? 'sent' : 'failed'
+          results.push({ id: d.id, status })
+          registrarEvento({
+            type: 'notification', category: 'demand', status,
+            level: sent ? 'info' : 'error', title: `Nova demanda #${d.id}`,
+            message: texto, context: { demand_id: d.id, sent, failed, error: lastError },
+          })
+        }
+        if (results.length) {
+          await fetch(`${config.hubUrl}/api/robo/demandas/ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: config.ingestToken, results }),
+          }).catch(() => null)
         }
       }
     }
   } catch (e) {
     console.warn('⚠️ Erro no aviso de demandas:', e.message)
+    registrarEvento({ level: 'error', category: 'demand', title: 'Erro no envio de demandas', message: e.message })
   }
 
   setTimeout(notificarDemandasLoop, 60000) // a cada 60s
@@ -885,9 +1005,12 @@ async function enviarNoGrupo(nome, texto) {
     const g =
       chats.find((c) => c.isGroup && (c.name || '').toLowerCase() === alvo) ||
       chats.find((c) => c.isGroup && (c.name || '').toLowerCase().includes(alvo))
-    if (g) await client.sendMessage(g.id._serialized, texto)
+    if (!g) return { ok: false, error: `Grupo "${nome}" não encontrado.` }
+    await client.sendMessage(g.id._serialized, texto)
+    return { ok: true }
   } catch (e) {
     console.warn('⚠️ Falha ao enviar no grupo:', e.message)
+    return { ok: false, error: e.message }
   }
 }
 
@@ -1071,16 +1194,23 @@ async function avisarAdminsMonitor(texto, media = null) {
   const destinos = destinosAdmins()
   if (!destinos.length) {
     console.warn('⚠️ Monitor detectou problema, mas não há admin conhecido/configurado para avisar.')
-    return
+    return { sent: 0, failed: 1, error: 'Nenhum administrador configurado.' }
   }
+  let sent = 0
+  let failed = 0
+  let lastError = null
   for (const dest of destinos) {
     try {
       if (media) await client.sendMessage(dest, media, { caption: texto })
       else await client.sendMessage(dest, texto)
+      sent++
     } catch (e) {
+      failed++
+      lastError = e.message
       console.warn('⚠️ Falha ao avisar admin do monitor:', e.message)
     }
   }
+  return { sent, failed, error: lastError }
 }
 
 async function checarSiteMonitor(site) {
@@ -1109,11 +1239,21 @@ async function checarSiteMonitor(site) {
       const duracaoMin = st.downSince ? Math.round((now - st.downSince) / 60000) : 0
       st.state = 'ok'
       st.downSince = null
+      const texto = `✅ *Site normalizou*\n${site.nome}\n${site.url}\nResposta: ${r.detail}${duracaoMin ? `\nTempo afetado: ~${duracaoMin} min` : ''}`
       if (notificacoesPermitidas()) {
         st.lastAlertAt = now
-        await avisarAdminsMonitor(
-          `✅ *Site normalizou*\n${site.nome}\n${site.url}\nResposta: ${r.detail}${duracaoMin ? `\nTempo afetado: ~${duracaoMin} min` : ''}`,
-        )
+        const delivery = await avisarAdminsMonitor(texto)
+        registrarEvento({
+          type: 'notification', category: 'monitor', status: delivery.sent ? 'sent' : 'failed',
+          level: delivery.sent ? 'info' : 'error', title: `Site normalizou: ${site.nome}`,
+          message: texto, context: { site: site.key, ...delivery },
+        })
+      } else {
+        registrarEvento({
+          type: 'notification', category: 'monitor', status: 'suppressed',
+          title: `Recuperação silenciada: ${site.nome}`, message: texto,
+          context: { site: site.key, reason: notificationState().reason },
+        })
       }
     } else if (st.state === 'unknown') {
       st.state = 'ok'
@@ -1134,10 +1274,10 @@ async function checarSiteMonitor(site) {
   const novoEstado = st.failCount >= site.failAfter ? 'down' : (st.slowCount >= site.slowAfter ? 'slow' : st.state)
   if (!st.downSince && ['down', 'slow'].includes(novoEstado)) st.downSince = now
 
-  const podeAlertar = notificacoesPermitidas() && (now - st.lastAlertAt >= site.alertEveryMs || st.state !== novoEstado)
+  const alertaDevido = now - st.lastAlertAt >= site.alertEveryMs || st.state !== novoEstado
   st.state = novoEstado
 
-  if (['down', 'slow'].includes(novoEstado) && podeAlertar) {
+  if (['down', 'slow'].includes(novoEstado) && alertaDevido) {
     st.lastAlertAt = now
     const ehDados = /não carregam|máquinas|dados/i.test(r.detail || '')
     const titulo = novoEstado === 'down'
@@ -1152,8 +1292,22 @@ async function checarSiteMonitor(site) {
       `Lentidões seguidas: ${st.slowCount}\n` +
       `Avisarei novamente a cada ${Math.round(site.alertEveryMs / 60000)} min enquanto continuar assim.\n\n` +
       `Para silenciar: *parar alertas*`
-    const media = await screenshotSite(site)
-    await avisarAdminsMonitor(texto, media)
+    if (notificacoesPermitidas()) {
+      const media = await screenshotSite(site)
+      const delivery = await avisarAdminsMonitor(texto, media)
+      registrarEvento({
+        type: 'notification', category: 'monitor', status: delivery.sent ? 'sent' : 'failed',
+        level: delivery.sent ? 'warning' : 'error', title: `${novoEstado === 'down' ? 'Site fora' : 'Site lento'}: ${site.nome}`,
+        message: texto, context: { site: site.key, state: novoEstado, ...delivery },
+      })
+    } else {
+      registrarEvento({
+        type: 'notification', category: 'monitor', status: 'held', level: 'warning',
+        title: `Alerta retido: ${site.nome}`, message: texto,
+        context: { site: site.key, state: novoEstado, reason: notificationState().reason },
+        queueText: texto,
+      })
+    }
   }
 
   monitorState.set(site.key, st)
@@ -1243,21 +1397,48 @@ async function checarMaquinasSite(site) {
       st.lastSeenAt = agora
       if (st.alerted) {
         st.alerted = false
-        if (!silenciado) await avisarAdminsMonitor(`✅ *Máquina voltou* — ${site.nome}\nMáquina ${id} voltou a enviar dados.`)
+        const texto = `✅ *Máquina voltou* — ${site.nome}\nMáquina ${id} voltou a enviar dados.`
+        if (!silenciado) {
+          const delivery = await avisarAdminsMonitor(texto)
+          registrarEvento({
+            type: 'notification', category: 'machine', status: delivery.sent ? 'sent' : 'failed',
+            level: delivery.sent ? 'info' : 'error', title: `Máquina ${id} voltou`, message: texto,
+            context: { site: site.key, machine: id, ...delivery },
+          })
+        } else {
+          registrarEvento({
+            type: 'notification', category: 'machine', status: 'suppressed',
+            title: `Recuperação silenciada: máquina ${id}`, message: texto,
+            context: { site: site.key, machine: id, reason: notificationState().reason },
+          })
+        }
       }
       continue
     }
 
     const foraMs = agora - st.lastSeenAt
-    if (foraMs >= offlineMs && !silenciado && (!st.alerted || agora - st.lastAlertAt >= site.maquinaAlertEveryMs)) {
+    if (foraMs >= offlineMs && (!st.alerted || agora - st.lastAlertAt >= site.maquinaAlertEveryMs)) {
       st.alerted = true
       st.lastAlertAt = agora
       const min = Math.round(foraMs / 60000)
-      await avisarAdminsMonitor(
-        `🔌 *Máquina offline* — ${site.nome}\n` +
+      const texto = `🔌 *Máquina offline* — ${site.nome}\n` +
         `Máquina ${id} parou de enviar dados há ~${min} min.\n\n` +
-        `Para silenciar: *parar alertas*`,
-      )
+        `Para silenciar: *parar alertas*`
+      if (!silenciado) {
+        const delivery = await avisarAdminsMonitor(texto)
+        registrarEvento({
+          type: 'notification', category: 'machine', status: delivery.sent ? 'sent' : 'failed',
+          level: delivery.sent ? 'warning' : 'error', title: `Máquina ${id} offline`, message: texto,
+          context: { site: site.key, machine: id, ...delivery },
+        })
+      } else {
+        registrarEvento({
+          type: 'notification', category: 'machine', status: 'held', level: 'warning',
+          title: `Alerta retido: máquina ${id}`, message: texto,
+          context: { site: site.key, machine: id, reason: notificationState().reason },
+          queueText: texto,
+        })
+      }
     }
   }
 }
@@ -1272,6 +1453,7 @@ async function monitorSitesLoop() {
     }
   } catch (e) {
     console.warn('⚠️ Erro no monitor de sites:', e.message)
+    registrarEvento({ level: 'error', category: 'monitor', title: 'Erro no monitor de sites', message: e.message })
   } finally {
     setTimeout(monitorSitesLoop, 15000)
   }
@@ -1343,25 +1525,54 @@ async function avisosLoop() {
       setTimeout(avisosLoop, 60000)
       return
     }
-    const res = await fetch(`${config.hubUrl}/api/robo/avisos?token=${encodeURIComponent(config.ingestToken)}`)
+    const res = await fetch(`${config.hubUrl}/api/robo/avisos?ack=1&token=${encodeURIComponent(config.ingestToken)}`)
     if (res.ok) {
       const data = await res.json()
+      const results = []
       for (const a of data.avisos || []) {
+        let sent = 0
+        let failed = 0
+        let lastError = null
         if (a.grupo) {
-          await enviarNoGrupo(a.grupo, a.texto)
+          const result = await enviarNoGrupo(a.grupo, a.texto)
+          if (result.ok) sent++
+          else { failed++; lastError = result.error }
         } else {
+          if (!adminChats.size) {
+            failed++
+            lastError = 'Nenhum chat de administrador conhecido.'
+          }
           for (const dest of adminChats) {
             try {
               await client.sendMessage(dest, a.texto)
+              sent++
             } catch (e) {
+              failed++
+              lastError = e.message
               console.warn('⚠️ Falha ao avisar admin:', e.message)
             }
           }
         }
+        const status = sent ? 'sent' : 'failed'
+        results.push({ id: a.id, status, error: lastError })
+        registrarEvento({
+          type: 'notification', category: 'queue', status,
+          level: sent ? 'info' : 'error',
+          title: a.grupo ? `Aviso enviado ao grupo ${a.grupo}` : 'Aviso enviado ao administrador',
+          message: a.texto, context: { notice_id: a.id, sent, failed, error: lastError },
+        })
+      }
+      if (results.length) {
+        await fetch(`${config.hubUrl}/api/robo/avisos/ack`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: config.ingestToken, results }),
+        }).catch(() => null)
       }
     }
   } catch (e) {
     console.warn('⚠️ Erro ao buscar avisos:', e.message)
+    registrarEvento({ level: 'error', category: 'queue', title: 'Erro ao processar fila de avisos', message: e.message })
   }
 
   setTimeout(avisosLoop, 60000) // a cada 60s
@@ -1502,8 +1713,21 @@ client.on('qr', async (qr) => {
   try { writeFileSync('qr-latest.txt', qr) } catch {}
 })
 
-client.on('authenticated', () => console.log('✅ Autenticado.'))
-client.on('auth_failure', (m) => console.error('❌ Falha de autenticação:', m))
+client.on('pairing-code', async (code, numero) => {
+  console.log(`\n🔢 CÓDIGO DE PAREAMENTO (${numero}): ${code}\n`)
+  registrarEvento({ type: 'session', category: 'pairing', status: 'pending', title: 'Código de pareamento gerado' })
+  if (activePairRequestId) await reportarPareamento(activePairRequestId, 'code', { code })
+})
+
+client.on('authenticated', () => {
+  console.log('✅ Autenticado.')
+  registrarEvento({ type: 'session', category: 'whatsapp', status: 'completed', title: 'WhatsApp autenticado' })
+})
+client.on('auth_failure', async (m) => {
+  console.error('❌ Falha de autenticação:', m)
+  registrarEvento({ type: 'session', level: 'error', category: 'whatsapp', status: 'failed', title: 'Falha de autenticação do WhatsApp', message: String(m || '') })
+  if (activePairRequestId) await reportarPareamento(activePairRequestId, 'failed', { error: String(m || 'Falha de autenticação') })
+})
 client.on('ready', () => {
   whatsappReady = true
   botId = client.info?.wid?._serialized || null // id do próprio bot (p/ detectar @menção)
@@ -1518,6 +1742,11 @@ client.on('ready', () => {
   idsBot.forEach(lembrarBotId)
   console.log('ℹ️ ids do bot:', JSON.stringify(idsBot), '| botIds=', JSON.stringify([...botIds]))
   console.log('\n🤖 Robô no ar! Escutando os grupos... (Ctrl+C para parar)\n')
+  registrarEvento({ type: 'session', category: 'whatsapp', status: 'completed', title: 'WhatsApp conectado', context: { version: VERSION } })
+  if (activePairRequestId) {
+    reportarPareamento(activePairRequestId, 'connected').catch(() => null)
+    activePairRequestId = null
+  }
 
   // Com o Baileys, 'ready' dispara a CADA reconexão. Os loops (heartbeat de
   // avisos/demandas/monitor + interval de reportar grupos) só podem iniciar UMA
@@ -1536,6 +1765,7 @@ client.on('ready', () => {
 client.on('disconnected', (r) => {
   whatsappReady = false
   console.warn('⚠️ Desconectado:', r)
+  registrarEvento({ type: 'session', level: 'warning', category: 'whatsapp', status: 'failed', title: 'WhatsApp desconectado', message: String(r || '') })
 })
 
 // Evita reenviar a mesma mensagem (dedupe simples em memória).
@@ -1808,9 +2038,12 @@ setInterval(carregarConfigRemota, 60_000)
 // mudança de nonce (botões "Atualizar/Reiniciar robô" no painel) age sozinho.
 updateBaseline = remote?.update_nonce ?? null
 restartBaseline = remote?.restart_nonce ?? null
+reconnectBaseline = remote?.reconnect_nonce ?? null
 autoUpdateLoop()
 
 // Começa a reportar o estado ao hub (mesmo antes do WhatsApp conectar).
 heartbeatLoop()
+registrarEvento({ category: 'system', title: 'Robô iniciado', context: { version: VERSION, started_at: bootTime } })
+setInterval(flushEventos, 15_000)
 
 client.initialize()
