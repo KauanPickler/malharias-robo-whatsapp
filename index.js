@@ -1656,7 +1656,10 @@ async function askAssistente(msg, textoOverride = null) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: config.ingestToken, mensagem: pergunta, historico: hist }),
-      signal: AbortSignal.timeout(45000), // não trava esperando o hub pra sempre
+      // O Hub pode fazer mais de uma rodada com ferramentas, e cada chamada ao
+      // Gemini aceita até 120s. O limite antigo de 45s cortava respostas válidas
+      // antes de o Hub conseguir devolver a confirmação da ação.
+      signal: AbortSignal.timeout(180_000),
     })
     if (!res.ok) return aoFalhar(`⚠️ O hub respondeu com erro (${res.status}). Tenta de novo em instantes.`)
 
