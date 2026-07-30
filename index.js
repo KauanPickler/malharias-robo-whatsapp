@@ -356,6 +356,11 @@ function notificacoesPermitidas() {
   return !notificationState().quiet
 }
 
+/** No modo silencioso do NexoK, o bot nunca escreve em grupos. */
+function mensagensEmGrupoPermitidas() {
+  return cfg().notificationSettings?.mode !== 'silent'
+}
+
 function ehPedidoStatusModo(texto) {
   const value = String(texto || '').trim()
   return /(?:^|\b)(?:qual|que|em qual)\s+(?:é\s+|e\s+)?(?:o\s+)?modo\b/i.test(value)
@@ -999,6 +1004,10 @@ async function notificarDemandasLoop() {
 
 /** Envia um texto num grupo (pelo nome). */
 async function enviarNoGrupo(nome, texto) {
+  if (!mensagensEmGrupoPermitidas()) {
+    return { ok: false, suppressed: true, error: 'Modo silencioso ativo no NexoK.' }
+  }
+
   try {
     const chats = await client.getChats()
     const alvo = nome.toLowerCase()
@@ -1857,6 +1866,29 @@ client.on('message', async (msg) => {
     // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
+      const mencionou = await botFoiMencionado(msg, texto)
+      const comandoAutorizado =
+        numeroAutorizado(fromNum) &&
+        (
+          ehPedidoSilenciarAlertas(texto) ||
+          ehPedidoReativarAlertas(texto) ||
+          /^(status sites|\/status-sites|\/sites|sites)$/i.test(texto) ||
+          ehPedidoStatusModo(texto)
+        )
+
+      // O silencioso do NexoK significa saída zero nos grupos. Mensagens comuns
+      // continuam seguindo para a ingestão de demandas logo abaixo.
+      if (!mensagensEmGrupoPermitidas() && (mencionou || comandoAutorizado)) {
+        registrarEvento({
+          type: 'notification',
+          category: 'group',
+          status: 'suppressed',
+          title: `Resposta silenciada no grupo ${chat.name || '?'}`,
+          message: texto,
+          context: { reason: 'silent', mentioned: mencionou, authorized_command: comandoAutorizado },
+        })
+        return
+      }
 
       if (numeroAutorizado(fromNum) && ehPedidoSilenciarAlertas(texto)) {
         const ate = silenciarAlertasMonitor(40)
@@ -1875,8 +1907,6 @@ client.on('message', async (msg) => {
         await msg.reply(statusModoTexto())
         return
       }
-
-      const mencionou = await botFoiMencionado(msg, texto)
 
       if (mencionou) {
         const ok = numeroAutorizado(fromNum)
