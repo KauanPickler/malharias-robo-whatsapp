@@ -4,7 +4,8 @@
   "description": "Robô que escuta os grupos do WhatsApp e envia demandas ao Malharias Hub",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "baileys": "7.0.0-rc13",

@@ -16,6 +16,21 @@ export default {
   // Deixe null no Windows/Mac (usa o do puppeteer).
   chromiumPath: '/usr/bin/chromium-browser',
 
+  // Failover assistido Cloudflare. O robô NUNCA troca sozinho: após três
+  // falhas/recuperações, envia um código e exige confirmação no privado.
+  // Prefira definir o token no ambiente CLOUDFLARE_API_TOKEN. Se não puder,
+  // coloque-o somente no config.js local (o arquivo é ignorado pelo Git).
+  cloudflareFailover: {
+    enabled: true,
+    apiToken: '',
+    zoneId: '', // opcional; com Zone Read o robô descobre pelo domínio
+    zoneName: 'a3pprog.com.br',
+    failuresRequired: 3,
+    recoveriesRequired: 3,
+    cooldownMs: 15 * 60_000,
+    pendingTtlMs: 10 * 60_000,
+  },
+
   // --- Fallback local (o painel tem prioridade) ---
   grupoParaSistema: {
     // 'Nome do Grupo no WhatsApp': 'brusque',

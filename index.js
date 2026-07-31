@@ -16,6 +16,8 @@ import qrcode from 'qrcode-terminal'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
+import { request as httpsRequest } from 'https'
+import { criarControladorFailover } from './cloudflare-failover.js'
 
 // Guarda os chats dos admins (quem comanda o bot) para enviar avisos.
 // Persiste em arquivo pra sobreviver a reinício.
@@ -82,7 +84,7 @@ let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.6.0'
+const VERSION = '2.7.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -176,6 +178,44 @@ const DEFAULT_MONITOR_SITES = [
     url: 'https://projeto-demonstracao.a3pprog.com.br',
   },
 ]
+
+const DEFAULT_CLOUDFLARE_FAILOVER_SITES = {
+  'malharia-brusque': {
+    name: 'Malharia Brusque',
+    hostname: 'malharia-brusque.a3pprog.com.br',
+    primaryIp: '216.172.172.112',
+    fallbackTarget: 'malharia-brusque.pages.dev',
+  },
+  'pires-dashboard': {
+    name: 'Pires Dashboard',
+    hostname: 'pires-dashboard.a3pprog.com.br',
+    primaryIp: '216.172.172.112',
+    fallbackTarget: 'pires-textil.pages.dev',
+  },
+  'tecelagem-jm': {
+    name: 'Tecelagem JM',
+    hostname: 'tecelagem-jm.a3pprog.com.br',
+    primaryIp: '216.172.172.112',
+    fallbackTarget: 'tecelagem-jm.pages.dev',
+  },
+}
+
+const cloudflareLocal = config.cloudflareFailover || {}
+const failoverController = criarControladorFailover({
+  options: {
+    enabled: cloudflareLocal.enabled !== false,
+    apiToken: process.env.CLOUDFLARE_API_TOKEN || cloudflareLocal.apiToken,
+    zoneId: process.env.CLOUDFLARE_ZONE_ID || cloudflareLocal.zoneId,
+    zoneName: cloudflareLocal.zoneName || 'a3pprog.com.br',
+    failuresRequired: cloudflareLocal.failuresRequired || 3,
+    recoveriesRequired: cloudflareLocal.recoveriesRequired || 3,
+    cooldownMs: cloudflareLocal.cooldownMs || 15 * 60 * 1000,
+    pendingTtlMs: cloudflareLocal.pendingTtlMs || 10 * 60 * 1000,
+    sites: cloudflareLocal.sites || DEFAULT_CLOUDFLARE_FAILOVER_SITES,
+  },
+  notify: async (texto) => avisarAdminsMonitor(texto),
+  audit: registrarEvento,
+})
 
 /** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
 async function heartbeatLoop() {
@@ -834,6 +874,11 @@ async function tratarComando(msg, textoOverride = null) {
   const pediuModo = ehPedidoStatusModo(lower)
   const pediuVersao = lower.includes('versão') || lower.includes('versao') || lower.includes('version')
 
+  // Confirmações Cloudflare são tratadas localmente e só chegam aqui em chat
+  // privado de número autorizado. A IA nunca pode autorizar uma troca de DNS.
+  const failoverCommand = await failoverController.handleCommand(texto)
+  if (failoverCommand.handled) return msg.reply(failoverCommand.text)
+
   if (lower === 'ajuda' || lower === '/ajuda' || lower === 'help' || lower === 'menu') {
     return msg.reply(
       '🤖 *Posso te ajudar com:*\n' +
@@ -842,6 +887,7 @@ async function tratarComando(msg, textoOverride = null) {
         '• *status sites* — mostra o monitor de sites\n' +
         '• *qual modo* — mostra o modo de notificações atual\n' +
         '• *parar alertas* — silencia alertas de sites por 40 min\n' +
+        '• *status failover* — mostra origem e autorizações pendentes\n' +
         '• *versão* — mostra a versão do robô\n' +
         '• *reset* — limpa a conversa se eu travar\n\n' +
         'E qualquer coisa do sistema, é só pedir. Ex:\n' +
@@ -1174,6 +1220,91 @@ async function medirSite(site) {
   }
 }
 
+function requisitarOrigemDireta(site, primaryIp, path, method = 'GET', body = null) {
+  const target = new URL(site.url)
+  const ini = Date.now()
+  return new Promise((resolve) => {
+    const req = httpsRequest({
+      protocol: 'https:',
+      hostname: target.hostname,
+      servername: target.hostname,
+      port: 443,
+      path,
+      method,
+      timeout: site.timeoutMs,
+      lookup: (_hostname, options, callback) => {
+        if (options?.all) callback(null, [{ address: primaryIp, family: 4 }])
+        else callback(null, primaryIp, 4)
+      },
+      headers: {
+        Host: target.hostname,
+        'User-Agent': `MalhariasBot-OriginCheck/${VERSION}`,
+        ...(body ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        } : {}),
+      },
+    }, (res) => {
+      const chunks = []
+      let size = 0
+      res.on('data', (chunk) => {
+        size += chunk.length
+        if (size <= 2 * 1024 * 1024) chunks.push(chunk)
+        else req.destroy(new Error('Resposta da origem excedeu 2 MB'))
+      })
+      res.on('end', () => {
+        resolve({
+          statusCode: Number(res.statusCode || 0),
+          body: Buffer.concat(chunks).toString('utf8'),
+          ms: Date.now() - ini,
+        })
+      })
+    })
+    req.on('timeout', () => req.destroy(new Error(`timeout ${site.timeoutMs}ms`)))
+    req.on('error', (error) => resolve({ statusCode: 0, body: '', ms: Date.now() - ini, error: error.message }))
+    if (body) req.write(body)
+    req.end()
+  })
+}
+
+/** Testa a HostGator diretamente, ignorando o DNS que pode estar no Pages. */
+async function medirOrigemPrimaria(site, primaryIp) {
+  const page = await requisitarOrigemDireta(site, primaryIp, '/')
+  if (page.error || page.statusCode < 200 || page.statusCode >= 400) {
+    return {
+      status: 'down',
+      ms: page.ms,
+      detail: page.error || `HostGator HTTP ${page.statusCode}`,
+    }
+  }
+
+  if (site.deep && !deepNaoAplica.has(site.key)) {
+    const path = `/${site.deepPath}?e=${encodeURIComponent(site.deepEndpoint)}`
+    const data = await requisitarOrigemDireta(site, primaryIp, path, 'POST', '{}')
+    if (data.error || data.statusCode < 200 || data.statusCode >= 300) {
+      return {
+        status: 'down',
+        ms: data.ms,
+        detail: data.error || `HostGator dados HTTP ${data.statusCode}`,
+      }
+    }
+    try {
+      const parsed = JSON.parse(data.body)
+      const rows = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.data) ? parsed.data : null)
+      if (!rows) return { status: 'down', ms: data.ms, detail: 'HostGator retornou dados inválidos' }
+      return {
+        status: 'ok',
+        ms: Math.max(page.ms, data.ms),
+        detail: `HostGator respondeu · ${rows.length} máquina(s)`,
+      }
+    } catch {
+      return { status: 'down', ms: data.ms, detail: 'HostGator retornou JSON inválido' }
+    }
+  }
+
+  return { status: 'ok', ms: page.ms, detail: `HostGator HTTP ${page.statusCode} em ${page.ms}ms` }
+}
+
 async function screenshotSite(site) {
   if (!site.screenshot || !client.pupBrowser) return null
   let page = null
@@ -1234,7 +1365,7 @@ async function checarSiteMonitor(site) {
     downSince: null,
   }
 
-  if (now - st.lastCheckAt < site.checkEveryMs) return
+  if (now - st.lastCheckAt < site.checkEveryMs) return null
   st.lastCheckAt = now
 
   const r = await medirSite(site)
@@ -1268,7 +1399,7 @@ async function checarSiteMonitor(site) {
       st.state = 'ok'
     }
     monitorState.set(site.key, st)
-    return
+    return r
   }
 
   st.okCount = 0
@@ -1320,6 +1451,7 @@ async function checarSiteMonitor(site) {
   }
 
   monitorState.set(site.key, st)
+  return r
 }
 
 // Normaliza o id da máquina ("01" e 1 viram "1") p/ comparar entre 'maquinas'
@@ -1457,7 +1589,14 @@ async function monitorSitesLoop() {
     if (!whatsappReady) return
     const sites = (cfg().monitorSites || []).map(normalizarSiteMonitor).filter(Boolean)
     for (const site of sites) {
-      await checarSiteMonitor(site)
+      const result = await checarSiteMonitor(site)
+      if (result) {
+        await failoverController.observe(
+          site.key,
+          result,
+          (failoverSite) => medirOrigemPrimaria(site, failoverSite.primaryIp),
+        )
+      }
       await checarMaquinasSite(site)
     }
   } catch (e) {
@@ -1506,6 +1645,7 @@ function statusMonitorTexto() {
 }
 
 function monitorSnapshot() {
+  const failover = failoverController.snapshot().sites || {}
   return (cfg().monitorSites || [])
     .map(normalizarSiteMonitor)
     .filter(Boolean)
@@ -1520,6 +1660,8 @@ function monitorSnapshot() {
         detail: state?.lastResult?.detail || null,
         ms: Number(state?.lastResult?.ms || 0),
         last_check_at: state?.lastCheckAt ? new Date(state.lastCheckAt).toISOString() : null,
+        failover_mode: failover[site.key]?.mode || null,
+        failover_pending: failover[site.key]?.pending?.action || null,
       }
     })
 }

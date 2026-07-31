@@ -11,3 +11,5 @@ pair-code.txt
 web-version.txt
 historico/
 grupos-cache.json
+failover-state.json
+failover-state.json.tmp

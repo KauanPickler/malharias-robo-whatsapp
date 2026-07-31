@@ -55,6 +55,27 @@ O aplicativo permite:
 - reconectar a sessão ou gerar um código de pareamento por telefone;
 - reiniciar ou atualizar o processo remotamente.
 
+## Failover assistido Cloudflare
+
+O monitor acompanha Malharia Brusque, Pires Dashboard e Tecelagem JM. Depois de
+três falhas consecutivas, ele envia no privado de um número autorizado uma
+solicitação com código. O DNS só muda quando o administrador copia o comando
+completo `CONFIRMAR FAILOVER ...`. O retorno à HostGator também exige três
+verificações positivas e outro comando `CONFIRMAR RETORNO ...`.
+
+O token precisa ter somente `Zone / DNS / Edit` e `Zone / Zone / Read`, limitado
+à zona `a3pprog.com.br`. Configure-o no Raspberry sem enviá-lo ao Git:
+
+```bash
+export CLOUDFLARE_API_TOKEN='token_criado_na_cloudflare'
+pm2 restart malharias-robo --update-env
+```
+
+Alternativamente, preencha `cloudflareFailover.apiToken` somente no `config.js`
+local, que já é ignorado pelo Git. Use `status failover` no WhatsApp privado
+para consultar o estado. Solicitações expiram em dez minutos e há intervalo
+mínimo de quinze minutos entre trocas.
+
 Durante o silêncio, o monitor continua funcionando e as filas não são
 consumidas. As notificações pendentes voltam a ser enviadas quando o modo
 Normal for retomado.

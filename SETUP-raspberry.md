@@ -53,6 +53,11 @@ No `config.js`, preencha:
 - `hubUrl`: `https://malharia-hub.a3pprog.com.br`
 - `ingestToken`: o token gerado no painel em **Robô & IA**
 - `chromiumPath`: `/usr/bin/chromium-browser` (ou o que o `which` mostrou)
+- `cloudflareFailover.apiToken`: token restrito à zona `a3pprog.com.br`
+
+O token Cloudflare habilita apenas solicitações assistidas. O robô monitora e
+pede autorização no privado; nunca altera DNS sem o comando completo de
+confirmação recebido de um número cadastrado em `controleNumeros`.
 
 Salve (Ctrl+O, Enter, Ctrl+X).
 
