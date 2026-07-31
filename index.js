@@ -84,7 +84,7 @@ let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.7.0'
+const VERSION = '2.8.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -201,21 +201,46 @@ const DEFAULT_CLOUDFLARE_FAILOVER_SITES = {
 }
 
 const cloudflareLocal = config.cloudflareFailover || {}
-const failoverController = criarControladorFailover({
-  options: {
-    enabled: cloudflareLocal.enabled !== false,
-    apiToken: process.env.CLOUDFLARE_API_TOKEN || cloudflareLocal.apiToken,
-    zoneId: process.env.CLOUDFLARE_ZONE_ID || cloudflareLocal.zoneId,
-    zoneName: cloudflareLocal.zoneName || 'a3pprog.com.br',
-    failuresRequired: cloudflareLocal.failuresRequired || 3,
-    recoveriesRequired: cloudflareLocal.recoveriesRequired || 3,
-    cooldownMs: cloudflareLocal.cooldownMs || 15 * 60 * 1000,
-    pendingTtlMs: cloudflareLocal.pendingTtlMs || 10 * 60 * 1000,
-    sites: cloudflareLocal.sites || DEFAULT_CLOUDFLARE_FAILOVER_SITES,
-  },
-  notify: async (texto) => avisarAdminsMonitor(texto),
-  audit: registrarEvento,
-})
+let failoverController = null
+let failoverTokenAplicado = null
+
+/** Token efetivo: env > hub (config remota) > config.js local. */
+function tokenFailoverAtual() {
+  const rem = remote.cloudflare_failover || {}
+  return process.env.CLOUDFLARE_API_TOKEN || rem.api_token || cloudflareLocal.apiToken || ''
+}
+
+/** (Re)cria o controlador de failover com o token/estado efetivos. */
+function construirFailover() {
+  const rem = remote.cloudflare_failover || {}
+  const apiToken = tokenFailoverAtual()
+  failoverController = criarControladorFailover({
+    options: {
+      enabled: (rem.enabled ?? cloudflareLocal.enabled) !== false,
+      apiToken,
+      zoneId: process.env.CLOUDFLARE_ZONE_ID || cloudflareLocal.zoneId,
+      zoneName: rem.zone_name || cloudflareLocal.zoneName || 'a3pprog.com.br',
+      failuresRequired: cloudflareLocal.failuresRequired || 3,
+      recoveriesRequired: cloudflareLocal.recoveriesRequired || 3,
+      cooldownMs: cloudflareLocal.cooldownMs || 15 * 60 * 1000,
+      pendingTtlMs: cloudflareLocal.pendingTtlMs || 10 * 60 * 1000,
+      sites: cloudflareLocal.sites || DEFAULT_CLOUDFLARE_FAILOVER_SITES,
+    },
+    notify: async (texto) => avisarAdminsMonitor(texto),
+    audit: registrarEvento,
+  })
+  failoverTokenAplicado = apiToken
+}
+
+/** Reaplica o failover quando o token/estado muda no painel (config remota). */
+function aplicarFailoverRemoto() {
+  if (tokenFailoverAtual() !== failoverTokenAplicado) {
+    construirFailover()
+    console.log(`☁️ Failover reconfigurado pelo hub (token ${failoverTokenAplicado ? 'presente' : 'ausente'}).`)
+  }
+}
+
+construirFailover()
 
 /** Envia "sinal de vida" ao hub para o painel mostrar o estado do robô. */
 async function heartbeatLoop() {
@@ -306,6 +331,7 @@ async function carregarConfigRemota() {
     remote = await res.json()
     const nGrupos = Object.keys(remote.grupo_para_sistema || {}).length
     console.log(`⚙️  Config do hub carregada (${nGrupos} grupo(s) mapeado(s)).`)
+    aplicarFailoverRemoto() // aplica o token do Cloudflare vindo do painel
     const signature = JSON.stringify({
       notifications: remote.notification_settings,
       groups: nGrupos,
