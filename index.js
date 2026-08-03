@@ -13,6 +13,7 @@
 
 import { createClient, MessageMedia } from './wa-baileys.js'
 import qrcode from 'qrcode-terminal'
+import QRImage from 'qrcode'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
@@ -84,7 +85,7 @@ let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.8.0'
+const VERSION = '2.9.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -1888,7 +1889,35 @@ client.on('qr', async (qr) => {
   // Salva o QR puro em arquivo — permite gerar a imagem do QR pra parear
   // remotamente (sem depender do ASCII do log, que vem "sujo" pelo pm2).
   try { writeFileSync('qr-latest.txt', qr) } catch {}
+  // Envia o QR (imagem) pro hub para você escanear pelo painel do NexoK,
+  // sem precisar de acesso ao Raspberry.
+  enviarQrAoHub(qr)
 })
+
+/** Envia a imagem do QR (dataURL) pro hub, pra exibir no painel. */
+async function enviarQrAoHub(qr) {
+  try {
+    const image = await QRImage.toDataURL(qr, { margin: 1, width: 320 })
+    await fetch(`${config.hubUrl}/api/robo/qr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, image }),
+    })
+  } catch (e) {
+    console.warn('⚠️ Falha ao enviar QR ao hub:', e.message)
+  }
+}
+
+/** Limpa o QR no hub (ao autenticar) para o painel parar de mostrar. */
+async function limparQrDoHub() {
+  try {
+    await fetch(`${config.hubUrl}/api/robo/qr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: config.ingestToken, image: null }),
+    })
+  } catch {}
+}
 
 client.on('pairing-code', async (code, numero) => {
   console.log(`\n🔢 CÓDIGO DE PAREAMENTO (${numero}): ${code}\n`)
@@ -1899,6 +1928,7 @@ client.on('pairing-code', async (code, numero) => {
 client.on('authenticated', () => {
   console.log('✅ Autenticado.')
   registrarEvento({ type: 'session', category: 'whatsapp', status: 'completed', title: 'WhatsApp autenticado' })
+  limparQrDoHub() // já conectou: tira o QR do painel
 })
 client.on('auth_failure', async (m) => {
   console.error('❌ Falha de autenticação:', m)
