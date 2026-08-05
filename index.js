@@ -1167,10 +1167,10 @@ function normalizarSiteMonitor(site) {
     supervisorMaquinas: site.supervisorMaquinas !== false && site.supervisor_maquinas !== false,
     supervisorCheckEveryMs: Number(site.supervisorCheckEveryMs || site.supervisor_check_every_ms || 15 * 60 * 1000),
     supervisorConfirmations: Number(site.supervisorConfirmations || site.supervisor_confirmations || 2),
-    supervisorLowRatio: Number(site.supervisorLowRatio || site.supervisor_low_ratio || 0.35),
+    supervisorLowRatio: Number(site.supervisorLowRatio || site.supervisor_low_ratio || 0.50),
     supervisorHighRatio: Number(site.supervisorHighRatio || site.supervisor_high_ratio || 3),
-    supervisorMinimumMedian: Number(site.supervisorMinimumMedian || site.supervisor_minimum_median || 10_000),
-    supervisorMinimumGap: Number(site.supervisorMinimumGap || site.supervisor_minimum_gap || 10_000),
+    supervisorMinimumMedian: Number(site.supervisorMinimumMedian || site.supervisor_minimum_median || 500),
+    supervisorMinimumGap: Number(site.supervisorMinimumGap || site.supervisor_minimum_gap || 500),
   }
 }
 
