@@ -2249,7 +2249,13 @@ client.on('message', async (msg) => {
     // grupo com a IA. Senão, segue como demanda normal.
     if (chat.isGroup) {
       const texto = (msg.body || '').trim()
-      const mencionou = await botFoiMencionado(msg, texto)
+      const marcouBot = await botFoiMencionado(msg, texto)
+      // Se houver uma lista configurada, somente esses grupos podem obter
+      // resposta do robô por menção. A ingestão de demandas continua normal.
+      const gruposMencao = cfg().gruposSomenteMencao || []
+      const grupoPermitidoMencao = !gruposMencao.length || gruposMencao.some((g) =>
+        String(g).trim().toLowerCase() === String(chat.name || '').trim().toLowerCase())
+      const mencionou = marcouBot && grupoPermitidoMencao
       const comandoAutorizado =
         numeroAutorizado(fromNum) &&
         (
