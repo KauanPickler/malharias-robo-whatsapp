@@ -372,6 +372,8 @@ function cfg() {
     grupoParaSistema: remote.grupo_para_sistema ?? config.grupoParaSistema ?? {},
     controleNumeros: remote.controle_numeros ?? config.controleNumeros ?? [],
     notificarDemandas: remote.notificar_demandas ?? config.notificarDemandas ?? true,
+    gruposAvisos: remote.grupos_avisos ?? config.gruposAvisos ?? [],
+    gruposSomenteMencao: remote.grupos_somente_mencao ?? config.gruposSomenteMencao ?? [],
     somenteMapeados: remote.somente_mapeados ?? config.somenteMapeados ?? false,
     notificationSettings: remote.notification_settings ?? {
       mode: 'normal',
@@ -1095,6 +1097,11 @@ async function enviarNoGrupo(nome, texto) {
   if (!mensagensEmGrupoPermitidas()) {
     return { ok: false, suppressed: true, error: 'Modo silencioso ativo no NexoK.' }
   }
+  const permitidos = cfg().gruposAvisos || []
+  const nomeNormalizado = String(nome || '').trim().toLowerCase()
+  if (!permitidos.some((g) => String(g).trim().toLowerCase() === nomeNormalizado)) {
+    return { ok: true, suppressed: true, error: 'Grupo não selecionado para avisos automáticos.' }
+  }
 
   try {
     const chats = await client.getChats()
@@ -1387,7 +1394,8 @@ async function avisarAdminsMonitor(texto, media = null) {
   }
 
   const destinos = destinosAdmins()
-  if (!destinos.length) {
+  const grupos = cfg().gruposAvisos || []
+  if (!destinos.length && !grupos.length) {
     console.warn('⚠️ Monitor detectou problema, mas não há admin conhecido/configurado para avisar.')
     return { sent: 0, failed: 1, error: 'Nenhum administrador configurado.' }
   }
@@ -1404,6 +1412,11 @@ async function avisarAdminsMonitor(texto, media = null) {
       lastError = e.message
       console.warn('⚠️ Falha ao avisar admin do monitor:', e.message)
     }
+  }
+  for (const grupo of grupos) {
+    const result = await enviarNoGrupo(grupo, texto)
+    if (result.ok) sent++
+    else { failed++; lastError = result.error }
   }
   return { sent, failed, error: lastError }
 }
