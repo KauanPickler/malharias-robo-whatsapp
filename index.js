@@ -86,7 +86,7 @@ let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.9.0'
+const VERSION = '2.10.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -229,6 +229,7 @@ function construirFailover() {
       sites: cloudflareLocal.sites || DEFAULT_CLOUDFLARE_FAILOVER_SITES,
     },
     notify: async (texto) => avisarAdminsMonitor(texto),
+    canNotify: notificacoesPermitidas,
     audit: registrarEvento,
   })
   failoverTokenAplicado = apiToken
@@ -1366,6 +1367,11 @@ function destinosAdmins() {
 }
 
 async function avisarAdminsMonitor(texto, media = null) {
+  const notification = notificationState()
+  if (notification.quiet) {
+    return { sent: 0, failed: 0, suppressed: true, reason: notification.reason, error: null }
+  }
+
   const destinos = destinosAdmins()
   if (!destinos.length) {
     console.warn('⚠️ Monitor detectou problema, mas não há admin conhecido/configurado para avisar.')

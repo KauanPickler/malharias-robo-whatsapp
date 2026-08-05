@@ -26,6 +26,7 @@ export function criarControladorFailover({
   options = {},
   fetchImpl = fetch,
   notify = async () => {},
+  canNotify = () => true,
   audit = () => {},
   stateFile = './failover-state.json',
   now = () => Date.now(),
@@ -151,6 +152,10 @@ export function criarControladorFailover({
     limparPendenteExpirado(st)
     if (st.pending) return
     if (st.lastSwitchAt && now() - Number(st.lastSwitchAt) < cooldownMs) return
+    // O modo silencioso/noturno precisa impedir a criação do pedido, e não
+    // apenas ocultar seu envio. Caso contrário, o pedido expira e é recriado
+    // continuamente, gerando uma nova notificação a cada ciclo.
+    if (!canNotify()) return
 
     const pending = {
       id: randomUUID(),

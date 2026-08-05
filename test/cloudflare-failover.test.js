@@ -17,6 +17,7 @@ function fixture() {
   const temporary = mkdtempSync(join(tmpdir(), 'nexok-failover-'))
   let clock = 100_000
   let patchCount = 0
+  let notificationsAllowed = true
   let record = {
     id: 'record-1',
     type: 'A',
@@ -58,6 +59,7 @@ function fixture() {
     },
     fetchImpl,
     notify: async (text) => notifications.push(text),
+    canNotify: () => notificationsAllowed,
     audit: (event) => events.push(event),
     stateFile: join(temporary, 'state.json'),
     now: () => clock,
@@ -69,6 +71,7 @@ function fixture() {
     patchCount: () => patchCount,
     record: () => record,
     advance: (ms) => { clock += ms },
+    allowNotifications: (allowed) => { notificationsAllowed = allowed },
     cleanup: () => rmSync(temporary, { recursive: true, force: true }),
   }
 }
@@ -147,4 +150,36 @@ test('sem token o controlador fica somente desativado', async () => {
   assert.equal(notified, false)
   const status = await controller.handleCommand('status failover')
   assert.match(status.text, /desativado/)
+})
+
+test('modo silencioso não cria nem repete pedido de retorno do failover', async () => {
+  const f = fixture()
+  try {
+    const down = { status: 'down', detail: 'timeout carregando máquinas' }
+    const primaryOk = async () => ({ status: 'ok', detail: 'HostGator respondeu' })
+
+    await f.controller.observe('pires-dashboard', down, primaryOk)
+    await f.controller.observe('pires-dashboard', down, primaryOk)
+    await f.controller.observe('pires-dashboard', down, primaryOk)
+    const failoverCommand = f.notifications[0].match(/CONFIRMAR FAILOVER PIRES-DASHBOARD [A-F0-9]{6}/)?.[0]
+    assert.ok(failoverCommand)
+    await f.controller.handleCommand(failoverCommand)
+
+    f.advance(16 * 60_000)
+    f.allowNotifications(false)
+    for (let i = 0; i < 12; i++) {
+      await f.controller.observe('pires-dashboard', { status: 'ok' }, primaryOk)
+      f.advance(60_000)
+    }
+
+    assert.equal(f.notifications.length, 1, 'nenhum retorno deve ser enviado durante o silêncio')
+    assert.equal(f.controller.snapshot().sites['pires-dashboard'].pending, null)
+
+    f.allowNotifications(true)
+    await f.controller.observe('pires-dashboard', { status: 'ok' }, primaryOk)
+    assert.equal(f.notifications.length, 2, 'o pedido pode ser criado quando o modo normal voltar')
+    assert.match(f.notifications[1], /CONFIRMAR RETORNO PIRES-DASHBOARD/)
+  } finally {
+    f.cleanup()
+  }
 })
