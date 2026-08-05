@@ -19,6 +19,7 @@ import { spawn } from 'child_process'
 import { randomUUID } from 'crypto'
 import { request as httpsRequest } from 'https'
 import { criarControladorFailover } from './cloudflare-failover.js'
+import { analisarMaquinas, formatarRelatorioMaquinas, parseJsonTolerante } from './machine-supervisor.js'
 
 // Guarda os chats dos admins (quem comanda o bot) para enviar avisos.
 // Persiste em arquivo pra sobreviver a reinício.
@@ -86,7 +87,7 @@ let lastRemoteSignature = null
 
 // Estado do robô (para o heartbeat / painel).
 const bootTime = new Date().toISOString()
-const VERSION = '2.10.0'
+const VERSION = '2.11.0'
 
 // Número (privado) que recebe o "resumo do dia" em PDF. Pode virar config depois.
 const RESUMO_DIA_DESTINO = '5547999194341'
@@ -921,6 +922,7 @@ async function tratarComando(msg, textoOverride = null) {
         '• *resumo do grupo NOME* — resumo das mensagens do grupo\n' +
         '• *grupos* — lista os grupos disponíveis\n' +
         '• *status sites* — mostra o monitor de sites\n' +
+        '• *relatório máquinas* — offline, produção fora do padrão e causas\n' +
         '• *qual modo* — mostra o modo de notificações atual\n' +
         '• *parar alertas* — silencia alertas de sites por 40 min\n' +
         '• *status failover* — mostra origem e autorizações pendentes\n' +
@@ -937,6 +939,10 @@ async function tratarComando(msg, textoOverride = null) {
 
   if (/^(status sites|\/status-sites|\/sites|sites)$/i.test(lower)) {
     return msg.reply(statusMonitorTexto())
+  }
+
+  if (/^(relat[oó]rio|status)\s+(?:das\s+)?m[aá]quinas$|^\/supervisor$/i.test(lower)) {
+    return msg.reply(relatorioSupervisorTexto())
   }
 
   if (pediuModo && pediuVersao) {
@@ -1145,11 +1151,19 @@ function normalizarSiteMonitor(site) {
     // Alerta de MÁQUINA offline (parou de enviar dados). Ignora "parada"
     // (máquina desligada mas ainda reportando). Ativo por padrão nos dashboards.
     watchMaquinas: site.watchMaquinas !== false && site.watch_maquinas !== false,
-    maquinaOfflineMin: Number(site.maquinaOfflineMin || site.maquina_offline_min || 15),
+    maquinaOfflineMin: Number(site.maquinaOfflineMin || site.maquina_offline_min || 20),
     maquinaAlertEveryMs: Number(site.maquinaAlertEveryMs || site.maquina_alert_every_ms || 30 * 60 * 1000),
     // De quanto em quanto tempo consultar o status das máquinas (economia de
     // chamadas na API de dados). Padrão 5 min — independente do check de site.
     maquinaCheckEveryMs: Number(site.maquinaCheckEveryMs || site.maquina_check_every_ms || 5 * 60 * 1000),
+    // Supervisor operacional: cruza produção, disponibilidade e eventos.
+    supervisorMaquinas: site.supervisorMaquinas !== false && site.supervisor_maquinas !== false,
+    supervisorCheckEveryMs: Number(site.supervisorCheckEveryMs || site.supervisor_check_every_ms || 15 * 60 * 1000),
+    supervisorConfirmations: Number(site.supervisorConfirmations || site.supervisor_confirmations || 2),
+    supervisorLowRatio: Number(site.supervisorLowRatio || site.supervisor_low_ratio || 0.35),
+    supervisorHighRatio: Number(site.supervisorHighRatio || site.supervisor_high_ratio || 3),
+    supervisorMinimumMedian: Number(site.supervisorMinimumMedian || site.supervisor_minimum_median || 10_000),
+    supervisorMinimumGap: Number(site.supervisorMinimumGap || site.supervisor_minimum_gap || 10_000),
   }
 }
 
@@ -1625,6 +1639,149 @@ async function checarMaquinasSite(site) {
   }
 }
 
+// Supervisor operacional (offline + anomalias + causas por eventos).
+const supervisorUltimaChecagem = new Map()
+const supervisorFalhasCache = new Map()
+const supervisorOcorrencias = new Map()
+const supervisorRelatorios = new Map()
+
+function dataApiNoFuso(offsetDays = 0) {
+  const date = new Date(Date.now() + offsetDays * 86400000)
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return {
+    api: `${values.year.slice(-2)}-${values.month}-${values.day}`,
+    month: `${Number(values.month)}${values.year.slice(-2)}`,
+  }
+}
+
+async function postDadosSupervisor(site, endpoint, body = {}) {
+  const base = String(site.url).replace(/\/+$/, '')
+  const res = await fetch(`${base}/${site.deepPath}?e=${encodeURIComponent(endpoint)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'User-Agent': `MalhariasBot-Supervisor/${VERSION}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(Math.max(site.timeoutMs, 20_000)),
+  })
+  if (!res.ok) throw new Error(`${endpoint} HTTP ${res.status}`)
+  const data = parseJsonTolerante(await res.text())
+  if (/nenhum registro encontrado/i.test(String(data?.status?.erro || ''))) return []
+  if (data?.status?.erro || data?.error) throw new Error(data?.status?.erro || data.error)
+  return data
+}
+
+async function mapearComLimite(items, limit, handler) {
+  const output = new Array(items.length)
+  let cursor = 0
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++
+      output[index] = await handler(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return output
+}
+
+async function buscarFalhasSupervisor(site) {
+  const cached = supervisorFalhasCache.get(site.key)
+  if (cached && Date.now() - cached.at < 60 * 60 * 1000) return cached.names
+  const rows = await postDadosSupervisor(site, 'falhas', {})
+  const names = {}
+  for (const row of Array.isArray(rows) ? rows : []) names[Number(row.numero_falha)] = row.nome_falha
+  supervisorFalhasCache.set(site.key, { names, at: Date.now() })
+  return names
+}
+
+async function buscarLeiturasSupervisor(site, ids) {
+  const start = dataApiNoFuso(-1)
+  const end = dataApiNoFuso(0)
+  const months = [...new Set([start.month, end.month])]
+  return mapearComLimite(ids, 3, async (id) => {
+    try {
+      const batches = await Promise.all(months.map((month) => postDadosSupervisor(site, 'dados', {
+        maquina: String(id), mes_ano: month, data_inicio: start.api, data_fim: end.api,
+      })))
+      return { id, records: batches.flatMap((rows) => Array.isArray(rows) ? rows : []) }
+    } catch (error) {
+      return { id, records: null, error: error.message }
+    }
+  })
+}
+
+function atualizarOcorrenciasSupervisor(site, issues) {
+  const prefix = `${site.key}:`
+  const activeKeys = new Set(issues.map((issue) => `${prefix}${issue.machine}:${issue.type}`))
+  for (const key of supervisorOcorrencias.keys()) {
+    if (key.startsWith(prefix) && !activeKeys.has(key)) supervisorOcorrencias.delete(key)
+  }
+
+  const due = []
+  for (const issue of issues) {
+    const key = `${prefix}${issue.machine}:${issue.type}`
+    const state = supervisorOcorrencias.get(key) || { confirmations: 0, alerted: false }
+    state.confirmations++
+    if (!state.alerted && state.confirmations >= site.supervisorConfirmations && notificacoesPermitidas()) {
+      state.alerted = true
+      due.push(issue)
+    }
+    supervisorOcorrencias.set(key, state)
+  }
+  return due
+}
+
+async function checarSupervisorMaquinas(site) {
+  if (!site.supervisorMaquinas || deepNaoAplica.has(site.key)) return
+  const now = Date.now()
+  if (now - (supervisorUltimaChecagem.get(site.key) || 0) < site.supervisorCheckEveryMs) return
+  supervisorUltimaChecagem.set(site.key, now)
+
+  const ids = await buscarIdsMaquinas(site)
+  if (!ids.length) return
+  const [readings, failureNames] = await Promise.all([
+    buscarLeiturasSupervisor(site, ids),
+    buscarFalhasSupervisor(site).catch(() => ({})),
+  ])
+  const succeeded = readings.filter((machine) => Array.isArray(machine.records))
+  // Uma falha geral da API não pode virar dezenas de falsos alertas offline.
+  if (succeeded.length < Math.max(1, Math.ceil(ids.length * 0.7))) {
+    registrarEvento({ level: 'warning', category: 'supervisor', title: `Supervisor sem dados suficientes: ${site.nome}`, context: { expected: ids.length, received: succeeded.length } })
+    return
+  }
+
+  const analysis = analisarMaquinas({
+    machines: succeeded,
+    failureNames,
+    nowMs: now,
+    offlineMinutes: site.maquinaOfflineMin,
+    lowRatio: site.supervisorLowRatio,
+    highRatio: site.supervisorHighRatio,
+    minimumPeerMedian: site.supervisorMinimumMedian,
+    minimumGap: site.supervisorMinimumGap,
+  })
+  supervisorRelatorios.set(site.key, { site: site.nome, analysis, at: now })
+  const due = atualizarOcorrenciasSupervisor(site, analysis.issues)
+  if (!due.length) return
+
+  const texto = formatarRelatorioMaquinas(site.nome, analysis, due)
+  const delivery = await avisarAdminsMonitor(texto)
+  registrarEvento({
+    type: 'notification', category: 'supervisor', status: delivery.sent ? 'sent' : (delivery.suppressed ? 'suppressed' : 'failed'),
+    level: due.some((issue) => issue.severity === 'critical') ? 'warning' : 'info',
+    title: `Supervisor encontrou ${due.length} ocorrência(s): ${site.nome}`, message: texto,
+    context: { site: site.key, issues: due.map((issue) => ({ machine: issue.machine, type: issue.type })), ...delivery },
+  })
+}
+
+function relatorioSupervisorTexto() {
+  if (!supervisorRelatorios.size) return '🧶 O supervisor ainda não concluiu a primeira leitura. Tente novamente em alguns minutos.'
+  return [...supervisorRelatorios.values()]
+    .map(({ site, analysis }) => formatarRelatorioMaquinas(site, analysis))
+    .join('\n\n──────────\n\n')
+}
+
 async function monitorSitesLoop() {
   try {
     if (!whatsappReady) return
@@ -1638,7 +1795,8 @@ async function monitorSitesLoop() {
           (failoverSite) => medirOrigemPrimaria(site, failoverSite.primaryIp),
         )
       }
-      await checarMaquinasSite(site)
+      if (site.supervisorMaquinas) await checarSupervisorMaquinas(site)
+      else await checarMaquinasSite(site)
     }
   } catch (e) {
     console.warn('⚠️ Erro no monitor de sites:', e.message)

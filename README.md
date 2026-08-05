@@ -80,6 +80,19 @@ Durante o silêncio, o monitor continua funcionando e as filas não são
 consumidas. As notificações pendentes voltam a ser enviadas quando o modo
 Normal for retomado.
 
+## Supervisor de máquinas
+
+O robô consulta as leituras e os eventos dos dashboards e avisa no privado dos
+administradores quando encontra uma máquina offline ou uma produção muito fora
+do padrão das demais. O relatório cruza falhas, bloqueios e reinícios recentes
+para indicar causas prováveis. Envie `relatório máquinas` no privado para ver a
+última análise de todas as malharias.
+
+Para evitar falsos positivos, a anomalia precisa aparecer em duas leituras
+consecutivas. Por padrão, o supervisor roda a cada 15 minutos, considera offline
+após 20 minutos sem dados e só compara produção quando existem ao menos três
+máquinas ativas. O modo silencioso bloqueia integralmente esses avisos.
+
 ## Como funciona
 
 - O robô escuta **todos os grupos** em que o chip está.

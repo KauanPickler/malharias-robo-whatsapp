@@ -76,6 +76,14 @@ export default {
       recoverAfter: 2,
       alertEveryMs: 10 * 60_000,
       screenshot: true,
+      // Supervisor operacional (offline + produção fora do padrão + causas).
+      supervisorMaquinas: true,
+      supervisorCheckEveryMs: 15 * 60_000,
+      supervisorConfirmations: 2,
+      supervisorLowRatio: 0.35,
+      supervisorHighRatio: 3,
+      supervisorMinimumMedian: 10_000,
+      supervisorMinimumGap: 10_000,
     },
     {
       key: 'projeto-demonstracao',
