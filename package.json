@@ -1,6 +1,6 @@
 {
   "name": "malharias-robo-whatsapp",
-  "version": "2.13.0",
+  "version": "2.14.0",
   "description": "Robô que escuta os grupos do WhatsApp e envia demandas ao Malharias Hub",
   "type": "module",
   "scripts": {
