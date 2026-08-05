@@ -130,6 +130,7 @@ export function analisarMaquinas({
         detail: machine.latestAt
           ? `sem enviar dados há ${machine.ageMinutes} min`
           : 'nenhum dado encontrado no período consultado',
+        ageMinutes: machine.ageMinutes,
         causes: machine.causes,
       })
       continue
@@ -142,6 +143,7 @@ export function analisarMaquinas({
         severity: 'warning',
         title: `Produção muito baixa na máquina ${machine.id}`,
         detail: `turno ${turno.key}: ${Math.round(machine.value).toLocaleString('pt-BR')} contra mediana de ${Math.round(peerMedian).toLocaleString('pt-BR')} (${Math.round(machine.value / peerMedian * 100)}% do padrão)`,
+        ageMinutes: machine.ageMinutes,
         causes: machine.causes.length ? machine.causes : [machine.rpm <= 0 ? 'RPM atual zerado' : 'sem falha identificada nos eventos recentes'],
       })
     } else if (canCompare && machine.value > peerMedian * highRatio && machine.value - peerMedian >= minimumGap) {
@@ -151,12 +153,22 @@ export function analisarMaquinas({
         severity: 'warning',
         title: `Produção fora da curva na máquina ${machine.id}`,
         detail: `turno ${turno.key}: ${Math.round(machine.value).toLocaleString('pt-BR')} contra mediana de ${Math.round(peerMedian).toLocaleString('pt-BR')} (${Math.round(machine.value / peerMedian * 100)}% do padrão)`,
+        ageMinutes: machine.ageMinutes,
         causes: ['possível contador incorreto, reinício ou configuração divergente'],
       })
     }
   }
 
-  return { turno: turno.key, peerMedian, activeMachines: peerValues.length, snapshots, issues }
+  const totalProduction = snapshots.reduce((sum, m) => sum + (m.online ? m.value : 0), 0)
+  return { turno: turno.key, peerMedian, activeMachines: peerValues.length, totalProduction, snapshots, issues }
+}
+
+function formatarTempo(ageMinutes) {
+  if (!Number.isFinite(ageMinutes) || ageMinutes <= 0) return null
+  if (ageMinutes < 60) return `${ageMinutes} min`
+  const h = Math.floor(ageMinutes / 60)
+  const m = ageMinutes % 60
+  return m > 0 ? `${h}h ${m}min` : `${h}h`
 }
 
 export function formatarRelatorioMaquinas(siteName, analysis, issues = analysis.issues) {
@@ -165,11 +177,14 @@ export function formatarRelatorioMaquinas(siteName, analysis, issues = analysis.
     `🧶 *Relatório de máquinas — ${siteName}*`,
     `Turno ${analysis.turno} · ${analysis.activeMachines} máquina(s) com dados recentes`,
     analysis.peerMedian > 0 ? `Mediana de produção: ${Math.round(analysis.peerMedian).toLocaleString('pt-BR')} batidas` : 'Mediana de produção: indisponível',
+    analysis.totalProduction > 0 ? `Total do turno: ${Math.round(analysis.totalProduction).toLocaleString('pt-BR')} batidas` : '',
     `Ocorrências: ${issues.length}${critical ? ` · ${critical} crítica(s)` : ''}`,
-  ]
+  ].filter(Boolean)
 
   for (const issue of issues) {
+    const tempo = formatarTempo(issue.ageMinutes)
     lines.push('', `${issue.severity === 'critical' ? '🔴' : '🟠'} *${issue.title}*`, issue.detail)
+    if (tempo) lines.push(`Último dado: há ${tempo}`)
     if (issue.causes?.length) lines.push(`Indícios: ${issue.causes.join(' · ')}`)
   }
   lines.push('', '_Análise automática baseada nas leituras e eventos das últimas 24 horas._')
