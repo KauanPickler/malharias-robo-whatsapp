@@ -105,10 +105,10 @@ export function analisarMaquinas({
   nowMs = Date.now(),
   timezone = DEFAULT_TIMEZONE,
   offlineMinutes = 20,
-  lowRatio = 0.35,
+  lowRatio = 0.50,
   highRatio = 3,
-  minimumPeerMedian = 10_000,
-  minimumGap = 10_000,
+  minimumPeerMedian = 500,
+  minimumGap = 500,
 } = {}) {
   const turno = turnoAtual(nowMs, timezone)
   const snapshots = machines.map((machine) => machineSnapshot(machine, failureNames, nowMs, offlineMinutes, turno))
