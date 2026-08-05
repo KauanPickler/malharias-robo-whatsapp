@@ -386,6 +386,22 @@ export function createClient(opts = {}) {
     await start()
   }
 
+  // Inicia uma sessão realmente nova para que o evento `qr` seja emitido e o
+  // painel consiga exibir o código. Esta operação só é chamada após a
+  // confirmação explícita do administrador no Malharias Hub.
+  client.startQrPairing = async function () {
+    pairNumber = null
+    pairRequested = false
+    try {
+      if (sock) await sock.logout()
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    rmSync(sessionDir, { recursive: true, force: true })
+    mkdirSync(sessionDir, { recursive: true })
+    client.info = null
+    await start()
+  }
+
   // ---- conexão (com reconexão automática) ----
   async function start() {
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir)

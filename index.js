@@ -79,6 +79,7 @@ let updateBaseline = null
 // Reinício remoto: baseline do "restart_nonce". Botão "Reiniciar robô" no painel.
 let restartBaseline = null
 let reconnectBaseline = null
+let qrBaseline = null
 let pairRequestBaseline = null
 let activePairRequestId = null
 let lastRemoteSignature = null
@@ -303,6 +304,13 @@ async function autoUpdateLoop() {
       reconnectBaseline = reconnect
       registrarEvento({ type: 'action', category: 'session', status: 'completed', title: 'Reconexão solicitada pelo NexoK' })
       await client.reconnect()
+    }
+
+    const qr = remote?.qr_nonce ?? null
+    if (qr !== null && String(qr) !== String(qrBaseline)) {
+      qrBaseline = qr
+      registrarEvento({ type: 'action', category: 'pairing', status: 'pending', title: 'Novo QR solicitado pelo painel' })
+      await client.startQrPairing()
     }
 
     const pairRequest = remote?.pair_request
@@ -2267,6 +2275,7 @@ setInterval(carregarConfigRemota, 60_000)
 updateBaseline = remote?.update_nonce ?? null
 restartBaseline = remote?.restart_nonce ?? null
 reconnectBaseline = remote?.reconnect_nonce ?? null
+qrBaseline = remote?.qr_nonce ?? null
 autoUpdateLoop()
 
 // Começa a reportar o estado ao hub (mesmo antes do WhatsApp conectar).
